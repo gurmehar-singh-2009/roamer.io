@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-1.26 -1.26 2.52 2.52">
+
+    <g stroke="#525252" stroke-width="0.09">
+
+        <circle cx = "0" cy = "0" r = "1" fill="#a5974c"/>
+
+        <path d = "M 0 -0.45 L 1.17 -0.45 L 1.17 0.45 L 0 0.45 Z" fill="#939393"/>
+
+        <circle cx = "0" cy = "0" r = "0.6" fill="#939393"/>
+
+    </g>
+
+</svg>

@@ -1,0 +1,20 @@
+max_width = 120
+
+hard_tabs = false
+tab_spaces = 4
+
+fn_params_layout = "Tall"
+
+array_width = 80
+control_brace_style = "AlwaysSameLine"
+
+reorder_imports = true
+group_imports = "StdExternalCrate"
+
+trailing_comma = "Vertical"
+
+enum_discrim_align_threshold = 20
+
+struct_field_align_threshold = 20
+
+wrap_comments = true

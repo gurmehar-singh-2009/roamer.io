@@ -1,0 +1,28 @@
+[workspace]
+members = ["server", "shared", "web/parser"]
+resolver = "3"
+
+package.license-file = "LICENSE.md"
+package.description = "A multiplayer survival game."
+package.keywords = ["moomoo", "cowgame", "moomoo.io", "moomoo2", "moomoo2.io", "new moomoo", "mohmoh", "hack", "mod", "game", "multiplayer", "survival", "agartha"]
+
+[profile.release]
+opt-level = 2
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+
+nursery = { level = "deny", priority = -1 }
+
+cargo = { level = "deny", priority = -1 }
+
+missing_docs_in_private_items = "warn"
+todo = "deny"
+unimplemented = "deny"
+print_stdout = "warn"
+print_stderr = "warn"

@@ -1,0 +1,17 @@
+[package]
+name = "shared"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+borsh = "1.6.0"
+borsh-derive = "1.6.0"
+
+bevy_ecs = "0.17.3"
+wasm-bindgen = { version = "0.2.106", optional = true }
+serde = "1.0.228"
+
+[features]
+default = []
+server = []
+web = ["wasm-bindgen"]

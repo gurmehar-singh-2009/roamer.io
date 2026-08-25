@@ -1,0 +1,9 @@
+[target.'cfg(target_os = "linux")']
+rustflags = [
+  "-C", "target-cpu=native",
+  "-C", "llvm-args=-unroll-loops",
+]
+
+[profile.profiling]
+inherits = "release"
+debug = true
