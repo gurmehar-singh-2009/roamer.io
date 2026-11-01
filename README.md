@@ -13,7 +13,7 @@
 [![Rust](https://img.shields.io/badge/Language-Rust-000000.svg?style=flat-square&logo=rust)](https://www.rust-lang.org/)
 [![JavaScript](https://img.shields.io/badge/Language-JavaScript-F7DF1E.svg?style=flat-square&logo=javascript)](https://developer.mozilla.org/en-US/docs/Web/JavaScript)
 [![WebAssembly](https://img.shields.io/badge/Target-WebAssembly-654FF0.svg?style=flat-square&logo=webassembly)](https://webassembly.org/)
-[![WebTransport](https://img.shields.io/badge/Network-WebTransport-4285F4.svg?style=flat-square)](https://developer.mozilla.org/en-US/docs/Web/API/WebTransport_API)
+[![WebSocket](https://img.shields.io/badge/Network-WebSocket-4285F4.svg?style=flat-square)](https://developer.mozilla.org/en-US/docs/Web/API/WebSockets_API)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
 ![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)
 ![Code Size](https://img.shields.io/github/languages/code-size/gurmehar-singh-2009/roamer.io?style=flat-square)
@@ -70,17 +70,10 @@ You will need the following installed:
 - Rust (nightly)
 - wasm-pack
 - Bun or Node.js
-- mkcert
 
 To install wasm-pack:
 ```bash
 cargo install wasm-pack
-```
-
-WebTransport needs a trusted TLS certificate, even locally. Make one with mkcert:
-```bash
-mkcert -install
-mkcert -cert-file server/cert.pem -key-file server/key.pem 127.0.0.1 localhost
 ```
 
 Then you can run
@@ -108,7 +101,7 @@ The `release/` folder holds a ready-to-run copy of the game: static binaries for
 ./build_release.sh   # build it (or rebuild after changes)
 ./release/roamer.sh  # set up and start, then open http://localhost:8081
 ```
-By default it uses TCP 8081 for the web page and UDP 8082 for the game, listening on `[::]` (IPv6 and IPv4). See [release/README.md](release/README.md) for ports, HTTPS and the other commands.
+By default everything (the web page and the game) goes through TCP 8081, listening on `[::]` (IPv6 and IPv4). See [release/README.md](release/README.md) for ports, HTTPS and the other commands.
 
 
 ## Controls
@@ -132,7 +125,7 @@ By default it uses TCP 8081 for the web page and UDP 8082 for the game, listenin
 
 ## Note on Networking
 
-The client talks to the server over WebTransport. Movement and aim are sent as unreliable datagrams; everything else goes over one ordered, reliable stream in each direction.
+The client talks to the server over a WebSocket. Each packet is one binary WebSocket message, and all of them arrive in order.
 Packets are encoded with [borsh](https://borsh.io/).
 
 
@@ -158,7 +151,11 @@ Final decisions on what code is accepted are made by me, at my own discretion.
 
 ## AI Usage
 
-Large parts of this project were written with the help of AI (Claude Code), including many of the gameplay systems and much of the client UI.
+Portions of the project were written with the help of AI (Claude Code), including:
+- The marching cubes implementation used for digging.
+- The sprite animations, and particle effects.
+- Suggestions on what crates to use (eg. for pathfinding for animals).
+- Some UI inspiration (eg. for leaderboard).
 
 
 ## Assets

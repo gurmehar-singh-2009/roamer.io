@@ -12,9 +12,13 @@ use std::{
 use bevy_ecs::prelude::*;
 use bytes::Bytes;
 use dashmap::DashMap;
+use futures_util::SinkExt;
 use shared::{to_client::ChatData, PacketType};
-use tokio::sync::mpsc;
-use wtransport::{Connection, VarInt};
+use tokio::sync::{mpsc, watch};
+use tokio_tungstenite::tungstenite::{
+    protocol::{frame::coding::CloseCode, CloseFrame},
+    Message,
+};
 
 use crate::{
     errors::InternalGameMessages,
@@ -30,11 +34,21 @@ use crate::{
     },
 };
 
+/// The sending half of a player's WebSocket.
+pub type WsSink = futures_util::stream::SplitSink<
+    tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    tokio_tungstenite::tungstenite::Message,
+>;
+
+/// Most messages waiting to be written to one player. A client that falls
+/// this far behind is disconnected.
+const SEND_QUEUE: usize = 4096;
+/// How often the server pings each client, so dead connections are noticed.
+const PING_EVERY: Duration = Duration::from_secs(5);
+
 /// A player connection.
 #[derive(Clone)]
 pub struct PlayerConnection {
-    /// The WebTransport connection.
-    pub connection: Connection,
     /// Session encryption.
     pub crypto:     SessionCrypto,
     /// The client's IP address.
@@ -43,72 +57,100 @@ pub struct PlayerConnection {
     pub bytes_sent: Arc<AtomicU64>,
     /// Total bytes received.
     pub bytes_recv: Arc<AtomicU64>,
-    /// Encrypted reliable messages, written in order on one stream by a
-    /// background task.
-    reliable_tx:    mpsc::UnboundedSender<Vec<u8>>,
+    /// Encrypted messages, written in order by a background task.
+    out:            mpsc::Sender<Message>,
+    /// Set to true to close the connection.
+    closed:         Arc<watch::Sender<bool>>,
 }
 
 impl PlayerConnection {
-    /// Wraps a connection and starts its reliable-stream writer. Must be
-    /// called inside the tokio runtime.
-    pub fn new(connection: Connection, crypto: SessionCrypto, ip: String) -> Self {
-        let (reliable_tx, mut reliable_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let writer_conn = connection.clone();
+    /// Wraps a WebSocket's sending half and starts its writer. Must be called
+    /// inside the tokio runtime.
+    pub fn new(mut sink: WsSink, crypto: SessionCrypto, ip: String) -> Self {
+        let (out, mut rx) = mpsc::channel::<Message>(SEND_QUEUE);
+        let (closed, mut closed_rx) = watch::channel(false);
         tokio::spawn(async move {
-            // One stream for everything keeps reliable messages in order.
-            let Ok(opening) = writer_conn.open_uni().await else {
-                return;
-            };
-            let Ok(mut stream) = opening.await else {
-                return;
-            };
-            while let Some(packet) = reliable_rx.recv().await {
-                let Ok(len) = u32::try_from(packet.len()) else {
-                    continue;
-                };
-                if stream.write_all(&len.to_be_bytes()).await.is_err() || stream.write_all(&packet).await.is_err() {
-                    break;
+            let mut ping = tokio::time::interval(PING_EVERY);
+            loop {
+                tokio::select! {
+                    msg = rx.recv() => {
+                        let Some(msg) = msg else { break };
+                        let is_close = matches!(msg, Message::Close(_));
+                        if sink.send(msg).await.is_err() || is_close {
+                            break;
+                        }
+                    }
+                    _ = closed_rx.changed() => {
+                        let _ = sink.send(Message::Close(None)).await;
+                        break;
+                    }
+                    _ = ping.tick() => {
+                        if sink.send(Message::Ping(Bytes::new())).await.is_err() {
+                            break;
+                        }
+                    }
                 }
             }
+            let _ = sink.close().await;
         });
         Self {
-            connection,
             crypto,
             ip,
             bytes_sent: Arc::new(AtomicU64::new(0)),
             bytes_recv: Arc::new(AtomicU64::new(0)),
-            reliable_tx,
+            out,
+            closed: Arc::new(closed),
         }
     }
 
-    /// Sends a message as an encrypted datagram.
-    ///
-    /// # Errors
-    /// Returns an error if encryption or sending fails.
-    pub fn send_encrypted(&self, plaintext: &[u8]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    /// Encrypts a message and queues it.
+    fn queue(&self, plaintext: &[u8]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let packet = self
             .crypto
             .encrypt(plaintext)
             .map_err(|e| format!("encrypt failed: {e}"))?;
         self.bytes_sent.fetch_add(packet.len() as u64, Ordering::Relaxed);
-        self.connection
-            .send_datagram(Bytes::from(packet))
-            .map_err(|e| format!("send_datagram failed: {e}"))?;
-        Ok(())
+        match self.out.try_send(Message::Binary(Bytes::from(packet))) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                // Too far behind to catch up: drop the player.
+                self.close("too slow");
+                Err("send queue full".into())
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => Err("connection closed".into()),
+        }
     }
 
-    /// Queues an encrypted message on the reliable stream.
+    /// Sends a frequent, replaceable message (positions and the like).
     ///
     /// # Errors
-    /// Returns an error if encryption fails or the writer has stopped.
+    /// Returns an error if encryption fails or the connection is gone.
+    pub fn send_encrypted(&self, plaintext: &[u8]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.queue(plaintext)
+    }
+
+    /// Sends a message that must arrive. Over a WebSocket every message is
+    /// delivered in order, so this is the same as `send_encrypted`.
+    ///
+    /// # Errors
+    /// Returns an error if encryption fails or the connection is gone.
     pub fn send_reliable(&self, plaintext: &[u8]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let packet = self
-            .crypto
-            .encrypt(plaintext)
-            .map_err(|e| format!("encrypt failed: {e}"))?;
-        self.bytes_sent.fetch_add(packet.len() as u64, Ordering::Relaxed);
-        self.reliable_tx.send(packet).map_err(|_| "reliable writer stopped")?;
-        Ok(())
+        self.queue(plaintext)
+    }
+
+    /// Closes the connection, telling the client why.
+    pub fn close(&self, reason: &str) {
+        let frame = CloseFrame {
+            code:   CloseCode::Library(4000),
+            reason: reason.to_owned().into(),
+        };
+        let _ = self.out.try_send(Message::Close(Some(frame)));
+        self.closed.send_replace(true);
+    }
+
+    /// Resolves once the connection has been told to close.
+    pub fn closed(&self) -> watch::Receiver<bool> {
+        self.closed.subscribe()
     }
 }
 
@@ -192,7 +234,7 @@ impl World {
             tracing::warn!("kicking player {} ({})", id, reason);
             if let Some((_, conn)) = player_connections.remove(&id) {
                 blacklist(&conn.ip);
-                conn.connection.close(VarInt::from_u32(41), reason.as_bytes());
+                conn.close(reason);
             }
             player_system::disconnect(&mut self.bevy_world, id);
         }

@@ -11,11 +11,10 @@ use pqc_kyber::{KYBER_PUBLICKEYBYTES, KYBER_SSBYTES};
 use rand_core::OsRng;
 use sha2::Sha256;
 use snafu::{OptionExt, ResultExt};
-use wtransport::{RecvStream, SendStream};
 use x25519_dalek::{EphemeralSecret, PublicKey};
 
-use crate::errors::{EncryptionSnafu, GameError, HKDFExpansionFailureSnafu, WriteSliceSnafu};
-use crate::errors::{FaultyMessageSnafu, ReadSliceSnafu};
+use crate::errors::FaultyMessageSnafu;
+use crate::errors::{EncryptionSnafu, GameError, HKDFExpansionFailureSnafu};
 
 /// Per-connection task.
 mod handle_conn;
@@ -134,26 +133,20 @@ impl SessionCrypto {
 /// The server generates an Ephemeral key (one time use), and we derive a public
 /// key from it. Client does the same, we get their public key through
 /// '`ClientHello`'. In other words: combines x25519 and kyber.
-pub async fn perform_handshake(send: &mut SendStream, recv: &mut RecvStream) -> Result<SessionCrypto, GameError> {
+///
+/// Takes the client's first WebSocket message and returns the session plus
+/// the `ServerHello` message to send back.
+pub fn perform_handshake(client_hello: &[u8]) -> Result<(SessionCrypto, Vec<u8>), GameError> {
     // Create the key.
     let server_secret = EphemeralSecret::random_from_rng(OsRng);
     // Derive a public key.
     let server_public = PublicKey::from(&server_secret);
 
-    // Messages are length-prefixed: first 4 bytes tell us how many bytes to
-    // read next. This is necessary because streams have no built-in message
-    // boundaries.
-    let mut len_buf = [0u8; 4];
-    recv.read_exact(&mut len_buf).await.ok().context(ReadSliceSnafu)?;
-
-    // Reads the remaining msg based on the length.
-    // Same buffer idea as before.
-    let msg_len = u32::from_be_bytes(len_buf) as usize;
-    let mut buf = vec![0u8; msg_len];
-    recv.read_exact(&mut buf).await.ok().context(ReadSliceSnafu)?;
+    // Each WebSocket message arrives whole, so no length prefix is needed.
+    let buf = client_hello;
 
     // Reconstruct the ClientHello msg (that's what we expect).
-    let client_hello: ClientHello = borsh::from_slice(&buf).ok().context(FaultyMessageSnafu)?;
+    let client_hello: ClientHello = borsh::from_slice(buf).ok().context(FaultyMessageSnafu)?;
 
     // Reconstruct the client's x25519 public key from the raw bytes they sent.
     let client_x25519_pk = PublicKey::from(client_hello.x25519_pk);
@@ -206,17 +199,11 @@ pub async fn perform_handshake(send: &mut SendStream, recv: &mut RecvStream) -> 
         kyber_ct:  kyber_ciphertext.to_vec(),
     };
 
-    // We send it to the client.
+    // Encoded for the client.
     let response_bytes = borsh::to_vec(&server_hello).context(EncryptionSnafu)?;
-    let len_bytes = u32::try_from(response_bytes.len())
-        .ok()
-        .context(WriteSliceSnafu)?
-        .to_be_bytes();
-    send.write_all(&len_bytes).await.ok().context(WriteSliceSnafu)?;
-    send.write_all(&response_bytes).await.ok().context(WriteSliceSnafu)?;
 
     tracing::info!("handshake complete - session encrypted");
 
     // Return a SessionCrypto instance with the session key.
-    Ok(SessionCrypto::new(session_key))
+    Ok((SessionCrypto::new(session_key), response_bytes))
 }

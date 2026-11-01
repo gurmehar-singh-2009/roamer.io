@@ -5,14 +5,18 @@
 //! - `CLIENT_PORT`: port to listen on (default 8081). It listens on every
 //!   interface, IPv6 and IPv4 (`[::]:PORT`).
 //! - `WEB_ROOT`: folder with the client files (default `web`).
+//! - `GAME_ADDR`: the game server's WebSocket port (default
+//!   `127.0.0.1:8082`). WebSocket upgrades on `/ws` are passed through to it.
 //! - `POW_ADDR`: the game server's proof-of-work endpoint (default
-//!   `127.0.0.1:8083`). `GET /challenge` is passed through to it, so the page
-//!   gets its challenge from its own origin (no CORS, works behind HTTPS).
+//!   `127.0.0.1:8083`). `GET /challenge` is passed through to it.
 //! - `TLS_CERT` / `TLS_KEY`: PEM certificate and key. When both are set the
-//!   page is served over HTTPS (browsers only allow WebTransport on secure
-//!   pages, and `http://` is only secure on localhost).
+//!   page (and the game connection) is served over HTTPS.
+//!
+//! So the page, its challenge and the game all share one origin and one
+//! port, which is all a reverse proxy in front needs to know.
 
 use std::{
+    net::IpAddr,
     path::{Component, Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -32,6 +36,8 @@ const MAX_REQUEST: usize = 8192;
 
 /// Default proof-of-work endpoint.
 const DEFAULT_POW_ADDR: &str = "127.0.0.1:8083";
+/// Default game server (WebSocket) address.
+const DEFAULT_GAME_ADDR: &str = "127.0.0.1:8082";
 /// Longest a client may take to send its request.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -41,6 +47,8 @@ struct Site {
     root: PathBuf,
     /// The game server's proof-of-work endpoint.
     pow_addr: String,
+    /// The game server's WebSocket port.
+    game_addr: String,
 }
 
 #[tokio::main]
@@ -52,6 +60,7 @@ async fn main() -> std::io::Result<()> {
     let site = Arc::new(Site {
         root: PathBuf::from(std::env::var("WEB_ROOT").unwrap_or_else(|_| "web".into())),
         pow_addr: std::env::var("POW_ADDR").unwrap_or_else(|_| DEFAULT_POW_ADDR.into()),
+        game_addr: std::env::var("GAME_ADDR").unwrap_or_else(|_| DEFAULT_GAME_ADDR.into()),
     });
     let tls = match (std::env::var("TLS_CERT"), std::env::var("TLS_KEY")) {
         (Ok(cert), Ok(key)) if !cert.is_empty() && !key.is_empty() => {
@@ -69,7 +78,7 @@ async fn main() -> std::io::Result<()> {
     ));
 
     loop {
-        let Ok((socket, _)) = listener.accept().await else {
+        let Ok((socket, peer)) = listener.accept().await else {
             continue;
         };
         let site = site.clone();
@@ -80,11 +89,11 @@ async fn main() -> std::io::Result<()> {
                     if let Ok(Ok(stream)) =
                         tokio::time::timeout(REQUEST_TIMEOUT, tls.accept(socket)).await
                     {
-                        let _ = handle(stream, &site).await;
+                        let _ = handle(stream, peer.ip(), &site).await;
                     }
                 }
                 None => {
-                    let _ = handle(socket, &site).await;
+                    let _ = handle(socket, peer.ip(), &site).await;
                 }
             }
         });
@@ -121,6 +130,7 @@ fn log(line: &str) {
 /// Answers one request.
 async fn handle<S: AsyncRead + AsyncWrite + Unpin>(
     mut socket: S,
+    peer: IpAddr,
     site: &Site,
 ) -> std::io::Result<()> {
     let mut buf = vec![0_u8; MAX_REQUEST];
@@ -158,6 +168,13 @@ async fn handle<S: AsyncRead + AsyncWrite + Unpin>(
 
     if target.split('?').next() == Some("/challenge") {
         return proxy_challenge(&mut socket, &site.pow_addr).await;
+    }
+    if target.split('?').next() == Some("/ws") {
+        let head_len = head_end(&buf[..len]).unwrap_or(len);
+        let mut upstream_head =
+            forwarded_head(&head[..head.len().min(head_len)], peer).into_bytes();
+        upstream_head.extend_from_slice(&buf[head_len..len]);
+        return proxy_game(&mut socket, &site.game_addr, &upstream_head).await;
     }
 
     let Some(path) = resolve(&site.root, target) else {
@@ -281,6 +298,61 @@ async fn proxy_challenge<S: AsyncWrite + Unpin>(
     }
 }
 
+/// Where the request head ends (just past the blank line).
+fn head_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4)
+}
+
+/// The request head with `X-Forwarded-For` set to the player's IP, so the
+/// game server sees who's connecting. A proxy on this machine (Caddy, nginx)
+/// has already set it; from anyone else it could be faked, so it's replaced.
+fn forwarded_head(head: &str, peer: IpAddr) -> String {
+    let peer = peer.to_canonical();
+    let mut forwarded = None;
+    let mut lines = Vec::new();
+    for line in head.split("\r\n").filter(|l| !l.is_empty()) {
+        match line.split_once(':') {
+            Some((name, value)) if name.trim().eq_ignore_ascii_case("x-forwarded-for") => {
+                forwarded = Some(value.trim().to_string());
+            }
+            _ => lines.push(line),
+        }
+    }
+    let client = match forwarded {
+        Some(chain) if peer.is_loopback() => chain,
+        _ => peer.to_string(),
+    };
+    format!(
+        "{}\r\nX-Forwarded-For: {client}\r\n\r\n",
+        lines.join("\r\n")
+    )
+}
+
+/// Passes a WebSocket connection through to the game server: sends it the
+/// request, then copies bytes both ways until either side hangs up.
+async fn proxy_game<S: AsyncRead + AsyncWrite + Unpin>(
+    socket: &mut S,
+    game_addr: &str,
+    head: &[u8],
+) -> std::io::Result<()> {
+    let Ok(Ok(mut upstream)) =
+        tokio::time::timeout(REQUEST_TIMEOUT, TcpStream::connect(game_addr)).await
+    else {
+        return respond(
+            socket,
+            "502 Bad Gateway",
+            "text/plain",
+            b"game server unreachable",
+            "GET",
+        )
+        .await;
+    };
+    let _ = upstream.set_nodelay(true);
+    upstream.write_all(head).await?;
+    tokio::io::copy_bidirectional(socket, &mut upstream).await?;
+    Ok(())
+}
+
 /// Sends a response. Hashed build files are cached for long; everything
 /// else (index.html, config.json) is always fetched fresh.
 async fn respond<S: AsyncWrite + Unpin>(
@@ -325,6 +397,21 @@ mod tests {
         );
         assert_eq!(resolve(root, "/../etc/passwd"), None);
         assert_eq!(resolve(root, "/%2e%2e/etc/passwd"), None);
+    }
+
+    #[test]
+    fn forwarded_for_is_only_trusted_from_this_machine() {
+        let head = "GET /ws?pow=1 HTTP/1.1\r\nHost: x\r\nX-Forwarded-For: 1.2.3.4\r\n\r\n";
+        let local: IpAddr = "127.0.0.1".parse().unwrap();
+        let remote: IpAddr = "::ffff:5.6.7.8".parse().unwrap();
+        assert_eq!(
+            forwarded_head(head, local),
+            "GET /ws?pow=1 HTTP/1.1\r\nHost: x\r\nX-Forwarded-For: 1.2.3.4\r\n\r\n"
+        );
+        assert_eq!(
+            forwarded_head(head, remote),
+            "GET /ws?pow=1 HTTP/1.1\r\nHost: x\r\nX-Forwarded-For: 5.6.7.8\r\n\r\n"
+        );
     }
 
     #[test]

@@ -22,7 +22,7 @@ pub struct Config {
 pub struct GameConfig {
     /// Info string used when deriving session keys.
     pub hkdf_key:          String,
-    /// WebTransport port.
+    /// WebSocket port (TCP).
     pub port:              u16,
     /// Seconds before a silent connection is dropped.
     pub idle_timeout_secs: u64,

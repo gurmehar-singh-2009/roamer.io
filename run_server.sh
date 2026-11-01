@@ -18,8 +18,7 @@ fi
 # server/.cargo/config.toml, whose `-unroll-loops` flag current nightly rejects.
 (cd "$ROOT" && cargo build -p server ${FLAGS[@]+"${FLAGS[@]}"})
 
-# The server loads src/config/config.toml, cert.pem and key.pem relative to
-# its working directory.
+# The server loads src/config/config.toml relative to its working directory.
 cd "$ROOT/server"
 echo "Server running (game port ${GAME_PORT:-6767}, proof-of-work port ${POW_PORT:-3001}). Logs: server/server.log"
 exec "$ROOT/target/$PROFILE/server"

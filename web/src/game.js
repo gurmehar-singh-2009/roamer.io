@@ -13,67 +13,17 @@ import { loadTexturePack } from "./texturePack";
 import { isEntrance } from "./render/caves";
 
 /**
- * Where the server is. In development these come from the defaults (or
- * VITE_GAME_PORT / VITE_POW_PORT); a release build is told by the
- * /config.json file the client host serves (see release/roamer.sh):
- * { "gamePort", "powPort", "powPath"?, "host"?, "certHashes"? }. With
- * `powPath` the challenge comes from the page's own origin (the client host
- * passes it on to the game server).
+ * The game is reached through the page's own origin: `/challenge` for the
+ * proof-of-work challenge and `/ws` for the WebSocket. In development Vite
+ * passes both on to the server (vite.config.js); in a release the client
+ * host does (web/host).
  */
-const SERVER = {
-  host: "127.0.0.1",
-  gamePort: Number(import.meta.env?.VITE_GAME_PORT ?? 6767),
-  powPort: Number(import.meta.env?.VITE_POW_PORT ?? 3001),
-  powPath: null,
-  // SHA-256 hashes (base64) of a self-signed certificate to accept.
-  certHashes: [],
-};
+const CHALLENGE_PATH = "/challenge";
+const SOCKET_PATH = "/ws";
 
-/** Reads /config.json if the page was served with one. */
-async function loadServerConfig() {
-  try {
-    const res = await fetch("/config.json", { cache: "no-store" });
-    if (!res.ok) return;
-    const c = await res.json();
-    SERVER.host = c.host || location.hostname;
-    SERVER.gamePort = c.gamePort ?? SERVER.gamePort;
-    SERVER.powPort = c.powPort ?? SERVER.powPort;
-    SERVER.powPath = c.powPath ?? null;
-    SERVER.certHashes = c.certHashes ?? [];
-  } catch {
-    // No config: development defaults.
-  }
-}
-
-/** A host name for a URL (IPv6 addresses go in brackets). */
-const urlHost = (h) => (h.includes(":") && !h.startsWith("[") ? `[${h}]` : h);
-
-/** Messages that must arrive go on the reliable stream; the rest are
- * datagrams. */
-const DATAGRAM_OPCODES = new Set([C.MOVE, C.AIM]);
-
-/** Reads [length: u32 BE][payload] frames from a stream. */
-async function* readFrames(stream) {
-  const reader = stream.getReader();
-  let buf = new Uint8Array(0);
-  const need = async (n) => {
-    while (buf.length < n) {
-      const { value, done } = await reader.read();
-      if (done) return false;
-      const merged = new Uint8Array(buf.length + value.length);
-      merged.set(buf);
-      merged.set(value, buf.length);
-      buf = merged;
-    }
-    return true;
-  };
-  while (await need(4)) {
-    const len = new DataView(buf.buffer, buf.byteOffset, 4).getUint32(0, false);
-    if (!(await need(4 + len))) return;
-    yield buf.slice(4, 4 + len);
-    buf = buf.slice(4 + len);
-  }
-}
+/** Skip aim updates while this much is still waiting to be sent, so a slow
+ * connection doesn't fall further behind. */
+const MAX_BUFFERED = 64 * 1024;
 
 export class Game {
   constructor() {
@@ -148,95 +98,48 @@ export class Game {
   // ------------------------------------------------------------ network --
 
   async connect() {
-    await loadServerConfig();
-    const host = urlHost(SERVER.host);
-    const challengeUrl = SERVER.powPath
-      ? new URL(SERVER.powPath, location.href).href
-      : `http://${host}:${SERVER.powPort}/challenge`;
-    const challenge = await fetch(challengeUrl, { cache: "no-store" }).then((r) => r.text());
+    const res = await fetch(CHALLENGE_PATH, { cache: "no-store" });
+    if (!res.ok) throw new Error(`challenge: HTTP ${res.status}`);
+    const challenge = await res.text();
     const nonce = solve_pow(challenge, 4);
-    // A self-signed certificate is accepted by its hash (it must be ECDSA and
-    // valid for under two weeks; release/roamer.sh makes and renews it).
-    const options = SERVER.certHashes.length
-      ? {
-          serverCertificateHashes: SERVER.certHashes.map((h) => ({
-            algorithm: "sha-256",
-            value: Uint8Array.from(atob(h), (ch) => ch.charCodeAt(0)),
-          })),
-        }
-      : {};
-    this.wt = new WebTransport(`https://${host}:${SERVER.gamePort}/?pow=${nonce}&challenge=${challenge}`, options);
-    await this.wt.ready;
-    this.wt.closed
-      .catch(() => {})
-      .finally(() => {
-        this.connected = false;
-        this.dom.showLoading("Disconnected. Refresh to play again.");
-      });
 
-    this.datagramWriter = this.wt.datagrams.writable.getWriter();
-    this.datagramReader = this.wt.datagrams.readable.getReader();
+    const scheme = location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${scheme}://${location.host}${SOCKET_PATH}?pow=${nonce}&challenge=${challenge}`);
+    ws.binaryType = "arraybuffer";
+    this.ws = ws;
+    await new Promise((resolve, reject) => {
+      ws.onopen = resolve;
+      ws.onerror = () => reject(new Error("couldn't open the game connection"));
+    });
 
-    // Handshake on a bidirectional stream.
+    // Handshake: our hello, then the server's answer.
     const handshake = HandshakeState.create_client_hello();
-    const hello = handshake.message();
-    const framed = new Uint8Array(4 + hello.byteLength);
-    new DataView(framed.buffer).setUint32(0, hello.byteLength, false);
-    framed.set(hello, 4);
-    const stream = await this.wt.createBidirectionalStream();
-    const writer = stream.writable.getWriter();
-    await writer.write(framed);
-    const frames = readFrames(stream.readable);
-    const { value: serverHello } = await frames.next();
-    if (!serverHello) throw new Error("connection closed during handshake");
-    this.crypto = handshake.complete_handshake(serverHello);
-    writer.close().catch(() => {});
+    const serverHello = new Promise((resolve, reject) => {
+      ws.onmessage = (e) => resolve(new Uint8Array(e.data));
+      ws.onclose = () => reject(new Error("connection closed during handshake"));
+    });
+    ws.send(handshake.message());
+    this.crypto = handshake.complete_handshake(await serverHello);
 
-    // Our reliable stream to the server.
-    const uni = await this.wt.createUnidirectionalStream();
-    this.reliableWriter = uni.getWriter();
+    ws.onmessage = (e) => this.receive(new Uint8Array(e.data));
+    ws.onerror = null;
+    ws.onclose = () => {
+      this.connected = false;
+      this.dom.showLoading("Disconnected. Refresh to play again.");
+    };
     this.connected = true;
-
-    this.readDatagrams().catch((e) => console.error("datagram loop died:", e));
-    this.readReliable().catch((e) => console.error("reliable loop died:", e));
   }
 
   /** Encodes, encrypts and sends a message. */
-  async send(opcode, data) {
-    if (!this.connected) return;
-    const packet = this.crypto.encrypt(encode_into_bytes(data, opcode));
-    if (DATAGRAM_OPCODES.has(opcode)) {
-      await this.datagramWriter.write(packet).catch(() => {});
-      return;
-    }
-    const framed = new Uint8Array(4 + packet.length);
-    new DataView(framed.buffer).setUint32(0, packet.length, false);
-    framed.set(packet, 4);
-    await this.reliableWriter.write(framed).catch(() => {});
+  send(opcode, data) {
+    if (!this.connected || this.ws.readyState !== WebSocket.OPEN) return;
+    if (opcode === C.AIM && this.ws.bufferedAmount > MAX_BUFFERED) return;
+    this.ws.send(this.crypto.encrypt(encode_into_bytes(data, opcode)));
   }
 
   // Kept for the chat widget.
   sendEncrypted(data, opcode) {
     return this.send(opcode, data);
-  }
-
-  async readDatagrams() {
-    while (true) {
-      const { value, done } = await this.datagramReader.read();
-      if (done) return;
-      this.receive(value);
-    }
-  }
-
-  async readReliable() {
-    const streams = this.wt.incomingUnidirectionalStreams.getReader();
-    while (true) {
-      const { value: stream, done } = await streams.read();
-      if (done) return;
-      (async () => {
-        for await (const frame of readFrames(stream)) this.receive(frame);
-      })().catch((e) => console.error("reliable stream error:", e));
-    }
   }
 
   receive(bytes) {

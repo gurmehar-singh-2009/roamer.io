@@ -348,4 +348,3 @@ vite.config.ts.timestamp-*
 release/roamer.env
 release/data/
 release/logs/
-release/web/config.json

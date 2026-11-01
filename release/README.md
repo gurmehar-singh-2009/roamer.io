@@ -19,13 +19,12 @@ Everything needed to host Roamer.io, ready to run on any x86-64 Linux machine.
 That's it. On the first run it:
 
 1. Writes `roamer.env` with the default settings.
-2. Makes a certificate for the game connection (`data/`), which browsers trust through its hash; it's renewed automatically.
-3. Starts the game server and the web client, and keeps them running (a crashed one is restarted).
-4. Sets them to start on boot: a systemd user service when systemd is available, otherwise a `@reboot` cron entry.
+2. Starts the game server and the web client, and keeps them running (a crashed one is restarted).
+3. Sets them to start on boot: a systemd user service when systemd is available, otherwise a `@reboot` cron entry.
 
 Then open **http://localhost:8081**.
 
-It needs `openssl` (for the certificate) and nothing else.
+It needs nothing else installed.
 
 ## Commands
 
@@ -47,27 +46,31 @@ Everything listens on all interfaces, IPv6 and IPv4 (`[::]:PORT`). Ports 8080 an
 
 | Setting | Default | Protocol | Open it in the firewall? |
 | --- | --- | --- | --- |
-| `CLIENT_PORT` | 8081 | TCP | Yes: the web page |
-| `GAME_PORT` | 8082 | UDP | Yes: the game (WebTransport) |
+| `CLIENT_PORT` | 8081 | TCP | Yes: the web page and the game connection |
+| `GAME_PORT` | 8082 | TCP | No: the web client passes the game's WebSocket on to it |
 | `POW_PORT` | 8083 | TCP | No: the web client passes challenges on to it |
 
 ## Playing from other machines
 
-Browsers only allow the game's connection on a secure page, and `http://` is only secure on `localhost`. So for other players, serve the page over HTTPS in one of two ways:
+The page, its challenge (`/challenge`) and the game's WebSocket (`/ws`) all come from `CLIENT_PORT`, so players only need to reach that one port. Plain `http://your.server:8081` works.
 
-- Set `TLS_CERT` and `TLS_KEY` in `roamer.env` to a certificate for your domain (for example from Let's Encrypt), then `./roamer.sh restart`. Players open `https://your.domain:8081`.
-- Or put `CLIENT_PORT` behind an HTTPS reverse proxy (Caddy, nginx, your host's proxy).
+For HTTPS on a domain, use either:
 
-The game port needs nothing extra: its self-signed certificate is trusted through its hash. If you'd rather use a CA-signed certificate there too, set `GAME_CERT` and `GAME_KEY`.
+- An HTTPS reverse proxy in front of `CLIENT_PORT`. With Caddy that's all of it (WebSockets pass through on their own):
+  ```
+  your.domain {
+      reverse_proxy localhost:8081
+  }
+  ```
+- Or set `TLS_CERT` and `TLS_KEY` in `roamer.env` to a certificate for your domain (for example from Let's Encrypt), then `./roamer.sh restart`. Players open `https://your.domain:8081`.
 
-Set `PUBLIC_HOST` only if players reach the game server at a different address than the web page.
+The domain must point at this machine (an A or AAAA record) for its certificate to be issued.
 
 ## Files it creates
 
 - `roamer.env`: your settings
-- `data/`: the game certificate, accounts (`accounts.json`)
+- `data/`: accounts (`accounts.json`)
 - `logs/`: `server.log`, `client.log`, `roamer.log`
-- `web/config.json`: tells the web page which ports and certificate to use
 
 ## Rebuilding
 

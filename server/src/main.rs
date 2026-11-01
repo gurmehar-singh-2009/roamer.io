@@ -13,7 +13,11 @@ use tokio::{
     net::{TcpListener, TcpStream},
     sync::mpsc as god,
 };
-use wtransport::{endpoint::endpoint_side::Server, Endpoint, Identity, ServerConfig};
+use tokio_tungstenite::tungstenite::{
+    handshake::server::{ErrorResponse, Request, Response},
+    http::StatusCode,
+    protocol::WebSocketConfig,
+};
 
 use crate::{
     config::{load_config, Config},
@@ -85,7 +89,6 @@ async fn main() -> Result<(), GameError> {
 
     // Environment overrides let a second copy run next to the usual one.
     let game_port = env_port("GAME_PORT").unwrap_or(config.game.port);
-    let idle_timeout_secs = config.game.idle_timeout_secs;
 
     // Create instance of World.
     let mut world = World {
@@ -119,25 +122,11 @@ async fn main() -> Result<(), GameError> {
     // Create an internal channel for game messages.
     let (input_tx, input_rx) = god::channel::<(u32, InternalGameMessages)>(1024);
 
-    // Initialize WebTransport server.
-    let cert = std::env::var("CERT_FILE").unwrap_or_else(|_| "cert.pem".into());
-    let key = std::env::var("KEY_FILE").unwrap_or_else(|_| "key.pem".into());
-    let identity = Identity::load_pemfiles(&cert, &key)
+    // Players connect with WebSockets, on every interface, IPv6 and IPv4.
+    let server = TcpListener::bind(format!("[::]:{game_port}"))
         .await
         .ok()
         .context(SystemPanicSnafu)?;
-    // Listen on every interface, IPv6 and IPv4.
-    let bind: std::net::SocketAddr = format!("[::]:{game_port}").parse().ok().context(SystemPanicSnafu)?;
-    let server_config = ServerConfig::builder()
-        .with_bind_address(bind)
-        .with_identity(identity)
-        .keep_alive_interval(Some(Duration::from_secs(5)))
-        .max_idle_timeout(Some(Duration::from_secs(idle_timeout_secs)))
-        .ok()
-        .context(SystemPanicSnafu)?
-        .build();
-
-    let server = Endpoint::server(server_config).ok().context(SystemPanicSnafu)?;
 
     tracing::info!("Server listening on port {}", game_port);
 
@@ -356,9 +345,12 @@ fn allowed_origin(req: &str, allowed: &str) -> String {
     list.first().map_or_else(|| "*".to_string(), |s| (*s).to_string())
 }
 
-/// Spawns the task that accepts incoming WebTransport sessions.
+/// Largest message a client may send.
+const MAX_CLIENT_MESSAGE: usize = 64 * 1024;
+
+/// Spawns the task that accepts incoming WebSocket connections.
 fn spawn_accept_loop(
-    server: Endpoint<Server>,
+    server: TcpListener,
     pow: Arc<Pow>,
     connections: IDToConnection,
     tx: GameChannel,
@@ -366,77 +358,88 @@ fn spawn_accept_loop(
     ips: Arc<DashMap<String, u8>>,
 ) {
     // Stores the next user id.
-    let next_id = AtomicU32::new(0);
+    let next_id = Arc::new(AtomicU32::new(0));
 
     tokio::spawn(async move {
         loop {
-            let incoming_session = match server.accept().await.await {
+            let (socket, peer) = match server.accept().await {
                 Ok(s) => s,
                 Err(e) => {
-                    tracing::error!("Failed to accept session: {}", e);
+                    tracing::error!("Failed to accept connection: {}", e);
                     continue;
                 }
             };
+            let _ = socket.set_nodelay(true);
 
-            // Get the client IP, normalize it.
-            // Need to check if they are botting.
-            let client_ip = incoming_session
-                .headers()
-                .get("x-forwarded-for")
-                .and_then(|v| v.split(',').next())
-                .map_or_else(
-                    || incoming_session.remote_address().ip().to_string(),
-                    |v| v.trim().to_string(),
-                );
-            let client_ip = normalize_ip(&client_ip);
-
-            // Players caught scripting are blacklisted for a day.
-            if systems::anticheat_system::is_blacklisted(&client_ip) {
-                incoming_session.forbidden().await;
-                continue;
-            }
-
-            // Verify PoW
-            let path = incoming_session.path();
-            let nonce = extract_query_param(path, "pow").unwrap_or_default();
-            let challenge_key = extract_query_param(path, "challenge").unwrap_or_default();
-
-            if !pow.verify(&challenge_key, &nonce) {
-                incoming_session.forbidden().await;
-
-                continue;
-            }
-
-            let player_id = next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let pow = pow.clone();
             let connection_map = connections.clone();
             let game_tx = tx.clone();
             let input_map = input_map.clone();
             let ips = ips.clone();
-
-            ips.insert(client_ip.clone(), 1);
+            let next_id = next_id.clone();
 
             tokio::spawn(async move {
-                let connection = match incoming_session.accept().await {
-                    Ok(c) => c,
+                // Filled in while the upgrade request is checked.
+                let mut client_ip = String::new();
+                #[allow(clippy::result_large_err, reason = "tungstenite sets the callback's types")]
+                let check = |req: &Request, res: Response| -> Result<Response, ErrorResponse> {
+                    client_ip = normalize_ip(&client_address(req, peer.ip()));
+
+                    // Players caught scripting are blacklisted for a day.
+                    if systems::anticheat_system::is_blacklisted(&client_ip) {
+                        return Err(forbidden());
+                    }
+
+                    // Verify PoW.
+                    let query = req.uri().query().map_or_else(String::new, |q| format!("?{q}"));
+                    let nonce = extract_query_param(&query, "pow").unwrap_or_default();
+                    let challenge_key = extract_query_param(&query, "challenge").unwrap_or_default();
+                    if !pow.verify(&challenge_key, &nonce) {
+                        return Err(forbidden());
+                    }
+                    Ok(res)
+                };
+                let config = WebSocketConfig::default()
+                    .max_message_size(Some(MAX_CLIENT_MESSAGE))
+                    .max_frame_size(Some(MAX_CLIENT_MESSAGE));
+                let ws = match tokio_tungstenite::accept_hdr_async_with_config(socket, check, Some(config)).await {
+                    Ok(ws) => ws,
                     Err(e) => {
-                        tracing::error!("Failed to accept connection: {}", e);
+                        tracing::info!("refused a connection from {}: {}", peer, e);
                         return;
                     }
                 };
 
-                net::handle_conn(
-                    connection,
-                    player_id,
-                    client_ip,
-                    &ips,
-                    connection_map,
-                    game_tx,
-                    input_map,
-                )
-                .await;
+                let player_id = next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                ips.insert(client_ip.clone(), 1);
+                net::handle_conn(ws, player_id, client_ip, &ips, connection_map, game_tx, input_map).await;
             });
         }
     });
+}
+
+/// The player's IP. Behind a proxy on this machine (the release's web client,
+/// Caddy, nginx, Vite) it's the first `X-Forwarded-For` entry; from anywhere
+/// else that header could be faked, so the socket's address is used.
+fn client_address(req: &Request, peer: std::net::IpAddr) -> String {
+    let forwarded = req
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    match forwarded {
+        Some(ip) if peer.is_loopback() || peer.to_canonical().is_loopback() => ip.to_string(),
+        _ => peer.to_canonical().to_string(),
+    }
+}
+
+/// A 403 answer to a refused upgrade request.
+fn forbidden() -> ErrorResponse {
+    let mut res = ErrorResponse::new(None);
+    *res.status_mut() = StatusCode::FORBIDDEN;
+    res
 }
 
 /// Reads a port number from an environment variable.

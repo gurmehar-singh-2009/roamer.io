@@ -20,6 +20,6 @@ if [[ ! -d node_modules ]]; then
     "$PM" install
 fi
 
-# The server only allows requests from http://localhost:5173 (or
-# CLIENT_ORIGIN), so fail instead of silently moving to another port.
+# Vite passes /challenge and /ws on to the server (see vite.config.js).
+# Fail instead of silently moving to another port.
 exec "$PM" run dev -- --port "${CLIENT_PORT:-5173}" --strictPort

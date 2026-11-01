@@ -38,29 +38,19 @@ write_default_env() {
 # Roamer.io settings. Run ./roamer.sh restart after changing them.
 # Ports 8080 and 3000 can't be used.
 
-# The web page (TCP). Players open http(s)://HOST:CLIENT_PORT
+# The web page and the game connection (TCP). Players open
+# http(s)://HOST:CLIENT_PORT, or your domain if a reverse proxy is in front.
 CLIENT_PORT=8081
-# The game itself (UDP, WebTransport)
+# The game server's WebSocket port (TCP). The web client passes the game
+# connection on to it, so it doesn't need to be reachable from outside.
 GAME_PORT=8082
-# Proof-of-work challenges (TCP). The web client passes requests on to it,
-# so it doesn't need to be reachable from outside.
+# Proof-of-work challenges (TCP). Also passed on by the web client.
 POW_PORT=8083
 
-# Host name or IP the game server is reached at. Blank = the one the player
-# used to open the page (right for almost everyone).
-PUBLIC_HOST=
-
-# HTTPS for the web page. Browsers only allow the game's connection on a
-# secure page, and http:// is only secure on localhost. To play from other
-# machines, either set these to a certificate for your domain (PEM files),
-# or put CLIENT_PORT behind an HTTPS reverse proxy (Caddy, nginx...).
+# HTTPS for the web page (PEM files). Leave blank when a reverse proxy
+# (Caddy, nginx...) handles HTTPS in front of CLIENT_PORT.
 TLS_CERT=
 TLS_KEY=
-
-# A CA-signed certificate for the game port (PEM). Blank = a self-signed one
-# is made, renewed automatically, and trusted by the page through its hash.
-GAME_CERT=
-GAME_KEY=
 
 # 1 = developer chat commands (/xp, /res, /tp, /event...)
 ROAMER_DEV=0
@@ -94,14 +84,12 @@ check_settings() {
     check_port CLIENT_PORT "$CLIENT_PORT"
     check_port GAME_PORT "$GAME_PORT"
     check_port POW_PORT "$POW_PORT"
-    ((CLIENT_PORT != POW_PORT)) || die "CLIENT_PORT and POW_PORT must differ"
+    ((CLIENT_PORT != GAME_PORT && CLIENT_PORT != POW_PORT && GAME_PORT != POW_PORT)) ||
+        die "CLIENT_PORT, GAME_PORT and POW_PORT must all differ"
     [[ -x "$DIR/bin/roamer-server" && -x "$DIR/bin/roamer-client" ]] || die "missing binaries in $DIR/bin (run build_release.sh)"
     [[ -f "$DIR/web/index.html" ]] || die "missing the web client in $DIR/web (run build_release.sh)"
-    if [[ -n "${TLS_CERT}${TLS_KEY}" ]]; then
-        [[ -r "$TLS_CERT" && -r "$TLS_KEY" ]] || die "TLS_CERT / TLS_KEY must both point to readable PEM files"
-    fi
-    if [[ -n "${GAME_CERT}${GAME_KEY}" ]]; then
-        [[ -r "$GAME_CERT" && -r "$GAME_KEY" ]] || die "GAME_CERT / GAME_KEY must both point to readable PEM files"
+    if [[ -n "${TLS_CERT:-}${TLS_KEY:-}" ]]; then
+        [[ -r "$TLS_CERT" && -r "$TLS_KEY" ]] || die "TLS_CERT / TLS_KEY must both point to readable PEM files (or leave both blank)"
     fi
 }
 
@@ -109,62 +97,10 @@ check_settings() {
 check_ports_free() {
     command -v ss >/dev/null 2>&1 || return 0
     local busy
-    for p in "$CLIENT_PORT" "$POW_PORT"; do
+    for p in "$CLIENT_PORT" "$GAME_PORT" "$POW_PORT"; do
         busy=$(ss -Htln "sport = :$p" 2>/dev/null || true)
         [[ -z "$busy" ]] || die "TCP port $p is already in use"
     done
-    busy=$(ss -Huln "sport = :$GAME_PORT" 2>/dev/null || true)
-    [[ -z "$busy" ]] || die "UDP port $GAME_PORT is already in use"
-}
-
-# ------------------------------------------------------------ certificate --
-
-CERT="$DATA/game-cert.pem"
-KEY="$DATA/game-key.pem"
-
-# Self-signed game certificates must be ECDSA and valid for under 14 days to
-# be trusted by hash, so they're made for 13 days and renewed with 3 left.
-cert_needs_renewal() {
-    [[ -f "$CERT" && -f "$KEY" ]] || return 0
-    ! openssl x509 -in "$CERT" -noout -checkend $((3 * 86400)) >/dev/null 2>&1
-}
-
-make_cert() {
-    command -v openssl >/dev/null 2>&1 || die "openssl is needed to make the game certificate (or set GAME_CERT / GAME_KEY)"
-    local san="DNS:localhost,IP:127.0.0.1,IP:::1"
-    [[ -n "${PUBLIC_HOST:-}" ]] && {
-        if [[ "$PUBLIC_HOST" =~ ^[0-9.:]+$ ]]; then san="$san,IP:$PUBLIC_HOST"; else san="$san,DNS:$PUBLIC_HOST"; fi
-    }
-    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
-        -keyout "$KEY" -out "$CERT" -days 13 -subj "/CN=roamer.io" \
-        -addext "subjectAltName=$san" >/dev/null 2>&1 || die "openssl couldn't make the game certificate"
-    chmod 600 "$KEY"
-}
-
-# Picks the game certificate; prints the SHA-256 hash to trust (blank for a
-# CA-signed one).
-game_cert() {
-    if [[ -n "${GAME_CERT:-}" ]]; then
-        GAME_CERT_FILE="$GAME_CERT"
-        GAME_KEY_FILE="$GAME_KEY"
-        CERT_HASH=""
-        return
-    fi
-    if cert_needs_renewal; then make_cert; fi
-    GAME_CERT_FILE="$CERT"
-    GAME_KEY_FILE="$KEY"
-    CERT_HASH=$(openssl x509 -in "$CERT" -outform der | openssl dgst -sha256 -binary | base64)
-}
-
-# The web client's /config.json: where the game is and which certificate to
-# trust.
-write_client_config() {
-    local hashes="[]" host=""
-    [[ -n "$CERT_HASH" ]] && hashes="[\"$CERT_HASH\"]"
-    [[ -n "${PUBLIC_HOST:-}" ]] && host="\"host\": \"$PUBLIC_HOST\", "
-    printf '{ %s"gamePort": %s, "powPort": %s, "powPath": "/challenge", "certHashes": %s }\n' \
-        "$host" "$GAME_PORT" "$POW_PORT" "$hashes" >"$DIR/web/config.json.tmp"
-    mv "$DIR/web/config.json.tmp" "$DIR/web/config.json"
 }
 
 # -------------------------------------------------------------------- run --
@@ -176,7 +112,7 @@ start_server() {
     (
         cd "$DATA"
         GAME_PORT="$GAME_PORT" POW_PORT="$POW_PORT" CLIENT_ORIGIN="*" \
-            ROAMER_CONFIG="$DIR/config/config.toml" CERT_FILE="$GAME_CERT_FILE" KEY_FILE="$GAME_KEY_FILE" \
+            ROAMER_CONFIG="$DIR/config/config.toml" \
             LOG_FILE="$LOGS/server.log" ACCOUNTS_FILE="$DATA/accounts.json" ROAMER_DEV="$ROAMER_DEV" \
             exec "$DIR/bin/roamer-server"
     ) >>"$LOGS/server.out" 2>&1 &
@@ -184,7 +120,8 @@ start_server() {
 }
 
 start_client() {
-    CLIENT_PORT="$CLIENT_PORT" WEB_ROOT="$DIR/web" POW_ADDR="127.0.0.1:$POW_PORT" \
+    CLIENT_PORT="$CLIENT_PORT" WEB_ROOT="$DIR/web" \
+        GAME_ADDR="127.0.0.1:$GAME_PORT" POW_ADDR="127.0.0.1:$POW_PORT" \
         TLS_CERT="${TLS_CERT:-}" TLS_KEY="${TLS_KEY:-}" \
         "$DIR/bin/roamer-client" >>"$LOGS/client.log" 2>&1 &
     CLIENT_PID=$!
@@ -196,21 +133,17 @@ stop_children() {
     wait 2>/dev/null || true
 }
 
-# Runs both in the foreground: restarts whichever stops, and renews the
-# self-signed certificate (restarting the server) before it runs out.
+# Runs both in the foreground and restarts whichever stops.
 cmd_run() {
     load_env
     check_settings
     mkdir -p "$DATA" "$LOGS"
     check_ports_free
-    game_cert
-    write_client_config
     trap 'stop_children; exit 0' INT TERM
     start_server
     start_client
-    say "Roamer.io is running: game on UDP $GAME_PORT, web page on TCP $CLIENT_PORT (logs in $LOGS)"
+    say "Roamer.io is running on TCP $CLIENT_PORT (logs in $LOGS)"
 
-    local ticks=0
     while true; do
         sleep 5
         if ! kill -0 "$SERVER_PID" 2>/dev/null; then
@@ -220,16 +153,6 @@ cmd_run() {
         if ! kill -0 "$CLIENT_PID" 2>/dev/null; then
             echo "$(date '+%F %T') web client stopped, restarting" >>"$LOGS/roamer.log"
             start_client
-        fi
-        ticks=$((ticks + 1))
-        # Hourly certificate check.
-        if ((ticks % 720 == 0)) && [[ -z "${GAME_CERT:-}" ]] && cert_needs_renewal; then
-            echo "$(date '+%F %T') renewing the game certificate" >>"$LOGS/roamer.log"
-            game_cert
-            write_client_config
-            kill "$SERVER_PID" 2>/dev/null || true
-            wait "$SERVER_PID" 2>/dev/null || true
-            start_server
         fi
     done
 }
@@ -337,16 +260,13 @@ cmd_status() {
     elif running_pid >/dev/null; then
         running="yes (pid $(cat "$PID_FILE"))"
     fi
-    local scheme=http host="${PUBLIC_HOST:-localhost}"
+    local scheme=http
     [[ -n "${TLS_CERT:-}" ]] && scheme=https
     say "Roamer.io"
     echo "  running:   $running"
-    echo "  play at:   $scheme://$host:$CLIENT_PORT"
-    echo "  ports:     web TCP $CLIENT_PORT, game UDP $GAME_PORT, challenge TCP $POW_PORT (local)"
+    echo "  play at:   $scheme://localhost:$CLIENT_PORT (or this machine's address / your domain)"
+    echo "  ports:     TCP $CLIENT_PORT (open this one); game TCP $GAME_PORT and challenge TCP $POW_PORT stay local"
     echo "  logs:      $LOGS"
-    if [[ "$scheme" == http && "$host" != localhost && "$host" != 127.0.0.1 ]]; then
-        echo "  note:      players on other machines need HTTPS (set TLS_CERT / TLS_KEY in roamer.env)"
-    fi
 }
 
 cmd_logs() {
