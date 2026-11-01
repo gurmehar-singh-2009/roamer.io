@@ -13,13 +13,24 @@ import { loadTexturePack } from "./texturePack";
 import { isEntrance } from "./render/caves";
 
 /**
- * The game is reached through the page's own origin: `/challenge` for the
- * proof-of-work challenge and `/ws` for the WebSocket. In development Vite
- * passes both on to the server (vite.config.js); in a release the client
- * host does (web/host).
+ * Where the game server is. A release can name it in /config.json
+ * ({ "gameUrl": "wss://game.example.com" }); otherwise it's `/ws` on the
+ * page's own origin, which the client host (or Vite in development) passes on
+ * to the game server.
  */
-const CHALLENGE_PATH = "/challenge";
-const SOCKET_PATH = "/ws";
+async function gameUrl() {
+  try {
+    const res = await fetch("/config.json", { cache: "no-store" });
+    if (res.ok) {
+      const config = await res.json();
+      if (config.gameUrl) return config.gameUrl;
+    }
+  } catch {
+    // No config: use the page's origin.
+  }
+  const scheme = location.protocol === "https:" ? "wss" : "ws";
+  return `${scheme}://${location.host}/ws`;
+}
 
 /** Skip aim updates while this much is still waiting to be sent, so a slow
  * connection doesn't fall further behind. */
@@ -98,28 +109,45 @@ export class Game {
   // ------------------------------------------------------------ network --
 
   async connect() {
-    const res = await fetch(CHALLENGE_PATH, { cache: "no-store" });
-    if (!res.ok) throw new Error(`challenge: HTTP ${res.status}`);
-    const challenge = await res.text();
-    const nonce = solve_pow(challenge, 4);
-
-    const scheme = location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(`${scheme}://${location.host}${SOCKET_PATH}?pow=${nonce}&challenge=${challenge}`);
+    const ws = new WebSocket(await gameUrl());
     ws.binaryType = "arraybuffer";
     this.ws = ws;
+
+    // Messages before the game starts are read in order with next().
+    const inbox = [];
+    let waiting = null;
+    let closed = false;
+    ws.onmessage = (e) => {
+      const msg = new Uint8Array(e.data);
+      if (waiting) {
+        waiting.resolve(msg);
+        waiting = null;
+      } else inbox.push(msg);
+    };
+    ws.onclose = () => {
+      closed = true;
+      waiting?.reject(new Error("connection closed while connecting"));
+    };
+    const next = () =>
+      inbox.length
+        ? Promise.resolve(inbox.shift())
+        : closed
+          ? Promise.reject(new Error("connection closed while connecting"))
+          : new Promise((resolve, reject) => (waiting = { resolve, reject }));
+
     await new Promise((resolve, reject) => {
       ws.onopen = resolve;
       ws.onerror = () => reject(new Error("couldn't open the game connection"));
     });
 
+    // Proof of work: the server sends a challenge, we answer with the nonce.
+    const challenge = new TextDecoder().decode(await next());
+    ws.send(new TextEncoder().encode(String(solve_pow(challenge, 4))));
+
     // Handshake: our hello, then the server's answer.
     const handshake = HandshakeState.create_client_hello();
-    const serverHello = new Promise((resolve, reject) => {
-      ws.onmessage = (e) => resolve(new Uint8Array(e.data));
-      ws.onclose = () => reject(new Error("connection closed during handshake"));
-    });
     ws.send(handshake.message());
-    this.crypto = handshake.complete_handshake(await serverHello);
+    this.crypto = handshake.complete_handshake(await next());
 
     ws.onmessage = (e) => this.receive(new Uint8Array(e.data));
     ws.onerror = null;

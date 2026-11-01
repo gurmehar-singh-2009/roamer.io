@@ -20,6 +20,6 @@ if [[ ! -d node_modules ]]; then
     "$PM" install
 fi
 
-# Vite passes /challenge and /ws on to the server (see vite.config.js).
+# Vite passes /ws on to the server (see vite.config.js).
 # Fail instead of silently moving to another port.
 exec "$PM" run dev -- --port "${CLIENT_PORT:-5173}" --strictPort

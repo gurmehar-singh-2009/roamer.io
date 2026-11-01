@@ -42,29 +42,20 @@ Set `ROAMER_SERVICE=none` to start in the background without systemd or cron.
 
 ## Ports
 
-Everything listens on all interfaces, IPv6 and IPv4 (`[::]:PORT`). Ports 8080 and 3000 are not used and can't be picked.
+`roamer.sh` binds both services to `[::]:PORT` (every interface, IPv6 and IPv4). Ports 8080 and 3000 are not used and can't be picked.
 
-| Setting | Default | Protocol | Open it in the firewall? |
+| Setting | Default | Binds | What |
 | --- | --- | --- | --- |
-| `CLIENT_PORT` | 8081 | TCP | Yes: the web page and the game connection |
-| `GAME_PORT` | 8082 | TCP | No: the web client passes the game's WebSocket on to it |
-| `POW_PORT` | 8083 | TCP | No: the web client passes challenges on to it |
+| `CLIENT_PORT` | 8081 | `[::]:8081` | The web page, plus the game's WebSocket at `/ws` |
+| `GAME_PORT` | 8082 | `[::]:8082` | The game server's WebSocket |
+
+Everything is plain HTTP and WebSockets, with no certificates. The proof-of-work challenge travels inside the game's WebSocket.
 
 ## Playing from other machines
 
-The page, its challenge (`/challenge`) and the game's WebSocket (`/ws`) all come from `CLIENT_PORT`, so players only need to reach that one port. Plain `http://your.server:8081` works.
+Open `http://SERVER-IP:8081`. The page and the game both come through `CLIENT_PORT`, so that's the only port players need to reach. `./roamer.sh status` lists the addresses, and says whether the page is being served.
 
-For HTTPS on a domain, use either:
-
-- An HTTPS reverse proxy in front of `CLIENT_PORT`. With Caddy that's all of it (WebSockets pass through on their own):
-  ```
-  your.domain {
-      reverse_proxy localhost:8081
-  }
-  ```
-- Or set `TLS_CERT` and `TLS_KEY` in `roamer.env` to a certificate for your domain (for example from Let's Encrypt), then `./roamer.sh restart`. Players open `https://your.domain:8081`.
-
-The domain must point at this machine (an A or AAAA record) for its certificate to be issued.
+If HTTPS is handled in front of the game by something else (a proxy that maps a domain to a port), set `GAME_URL` in `roamer.env` to where browsers should connect, for example `GAME_URL=wss://game.example.com` for a domain forwarded to `GAME_PORT`. Leave it blank to use `/ws` on the page's own address.
 
 ## Files it creates
 

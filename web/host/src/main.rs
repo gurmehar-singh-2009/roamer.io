@@ -1,19 +1,13 @@
 //! Serves the built Roamer.io web client (the files `vite build` makes) over
-//! HTTP.
+//! plain HTTP.
 //!
 //! Settings (environment variables):
-//! - `CLIENT_PORT`: port to listen on (default 8081). It listens on every
-//!   interface, IPv6 and IPv4 (`[::]:PORT`).
+//! - `CLIENT_BIND`: address to listen on (default `[::]:8081`, every
+//!   interface, IPv6 and IPv4). `CLIENT_PORT` alone changes just the port.
 //! - `WEB_ROOT`: folder with the client files (default `web`).
 //! - `GAME_ADDR`: the game server's WebSocket port (default
-//!   `127.0.0.1:8082`). WebSocket upgrades on `/ws` are passed through to it.
-//! - `POW_ADDR`: the game server's proof-of-work endpoint (default
-//!   `127.0.0.1:8083`). `GET /challenge` is passed through to it.
-//! - `TLS_CERT` / `TLS_KEY`: PEM certificate and key. When both are set the
-//!   page (and the game connection) is served over HTTPS.
-//!
-//! So the page, its challenge and the game all share one origin and one
-//! port, which is all a reverse proxy in front needs to know.
+//!   `127.0.0.1:8082`). WebSocket upgrades on `/ws` are passed through to it,
+//!   so the page and the game can share one port.
 
 use std::{
     net::IpAddr,
@@ -22,20 +16,16 @@ use std::{
     time::Duration,
 };
 
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream},
 };
-use tokio_rustls::TlsAcceptor;
 
 /// Port used when `CLIENT_PORT` isn't set.
 const DEFAULT_PORT: u16 = 8081;
 /// Biggest request head we read.
 const MAX_REQUEST: usize = 8192;
 
-/// Default proof-of-work endpoint.
-const DEFAULT_POW_ADDR: &str = "127.0.0.1:8083";
 /// Default game server (WebSocket) address.
 const DEFAULT_GAME_ADDR: &str = "127.0.0.1:8082";
 /// Longest a client may take to send its request.
@@ -45,8 +35,6 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 struct Site {
     /// Folder with the client files.
     root: PathBuf,
-    /// The game server's proof-of-work endpoint.
-    pow_addr: String,
     /// The game server's WebSocket port.
     game_addr: String,
 }
@@ -59,66 +47,22 @@ async fn main() -> std::io::Result<()> {
         .unwrap_or(DEFAULT_PORT);
     let site = Arc::new(Site {
         root: PathBuf::from(std::env::var("WEB_ROOT").unwrap_or_else(|_| "web".into())),
-        pow_addr: std::env::var("POW_ADDR").unwrap_or_else(|_| DEFAULT_POW_ADDR.into()),
         game_addr: std::env::var("GAME_ADDR").unwrap_or_else(|_| DEFAULT_GAME_ADDR.into()),
     });
-    let tls = match (std::env::var("TLS_CERT"), std::env::var("TLS_KEY")) {
-        (Ok(cert), Ok(key)) if !cert.is_empty() && !key.is_empty() => {
-            Some(tls_acceptor(&cert, &key)?)
-        }
-        _ => None,
-    };
 
-    let addr = format!("[::]:{port}");
+    let addr = std::env::var("CLIENT_BIND").unwrap_or_else(|_| format!("[::]:{port}"));
     let listener = TcpListener::bind(&addr).await?;
-    let scheme = if tls.is_some() { "https" } else { "http" };
-    log(&format!(
-        "serving {} on {scheme}://{addr}",
-        site.root.display()
-    ));
+    log(&format!("serving {} on http://{addr}", site.root.display()));
 
     loop {
         let Ok((socket, peer)) = listener.accept().await else {
             continue;
         };
         let site = site.clone();
-        let tls = tls.clone();
         tokio::spawn(async move {
-            match tls {
-                Some(tls) => {
-                    if let Ok(Ok(stream)) =
-                        tokio::time::timeout(REQUEST_TIMEOUT, tls.accept(socket)).await
-                    {
-                        let _ = handle(stream, peer.ip(), &site).await;
-                    }
-                }
-                None => {
-                    let _ = handle(socket, peer.ip(), &site).await;
-                }
-            }
+            let _ = handle(socket, peer.ip(), &site).await;
         });
     }
-}
-
-/// Loads a PEM certificate chain and key for HTTPS.
-fn tls_acceptor(cert: &str, key: &str) -> std::io::Result<TlsAcceptor> {
-    let bad = |e: &dyn std::fmt::Display| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-    };
-    let certs = CertificateDer::pem_file_iter(cert)
-        .map_err(|e| bad(&e))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| bad(&e))?;
-    let key = PrivateKeyDer::from_pem_file(key).map_err(|e| bad(&e))?;
-    let config = rustls::ServerConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .map_err(|e| bad(&e))?
-    .with_no_client_auth()
-    .with_single_cert(certs, key)
-    .map_err(|e| bad(&e))?;
-    Ok(TlsAcceptor::from(Arc::new(config)))
 }
 
 /// Writes a line to the log (stderr, which the start script sends to a file).
@@ -166,9 +110,6 @@ async fn handle<S: AsyncRead + AsyncWrite + Unpin>(
         .await;
     }
 
-    if target.split('?').next() == Some("/challenge") {
-        return proxy_challenge(&mut socket, &site.pow_addr).await;
-    }
     if target.split('?').next() == Some("/ws") {
         let head_len = head_end(&buf[..len]).unwrap_or(len);
         let mut upstream_head =
@@ -262,39 +203,6 @@ fn content_type(path: &Path) -> &'static str {
         "woff2" => "font/woff2",
         "ico" => "image/x-icon",
         _ => "application/octet-stream",
-    }
-}
-
-/// Passes `GET /challenge` to the game server's proof-of-work endpoint and
-/// sends back its answer.
-async fn proxy_challenge<S: AsyncWrite + Unpin>(
-    socket: &mut S,
-    pow_addr: &str,
-) -> std::io::Result<()> {
-    let answer = async {
-        let mut upstream = TcpStream::connect(pow_addr).await?;
-        upstream
-            .write_all(b"GET /challenge HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-            .await?;
-        let mut response = Vec::new();
-        upstream.read_to_end(&mut response).await?;
-        Ok::<_, std::io::Error>(response)
-    };
-    match tokio::time::timeout(REQUEST_TIMEOUT, answer).await {
-        Ok(Ok(response)) if !response.is_empty() => {
-            socket.write_all(&response).await?;
-            socket.shutdown().await
-        }
-        _ => {
-            respond(
-                socket,
-                "502 Bad Gateway",
-                "text/plain",
-                b"game server unreachable",
-                "GET",
-            )
-            .await
-        }
     }
 }
 

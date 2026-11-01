@@ -36,21 +36,20 @@ die() {
 write_default_env() {
     cat >"$ENV_FILE" <<'EOF'
 # Roamer.io settings. Run ./roamer.sh restart after changing them.
+# Both services listen on [::]:PORT (every interface, IPv6 and IPv4).
 # Ports 8080 and 3000 can't be used.
 
-# The web page and the game connection (TCP). Players open
-# http(s)://HOST:CLIENT_PORT, or your domain if a reverse proxy is in front.
+# The web page (TCP). Players open http://HOST:CLIENT_PORT. The game's
+# WebSocket is passed through at /ws on this same port.
 CLIENT_PORT=8081
-# The game server's WebSocket port (TCP). The web client passes the game
-# connection on to it, so it doesn't need to be reachable from outside.
+# The game server's WebSocket (TCP).
 GAME_PORT=8082
-# Proof-of-work challenges (TCP). Also passed on by the web client.
-POW_PORT=8083
 
-# HTTPS for the web page (PEM files). Leave blank when a reverse proxy
-# (Caddy, nginx...) handles HTTPS in front of CLIENT_PORT.
-TLS_CERT=
-TLS_KEY=
+# Where browsers connect to the game. Blank = /ws on the web page's own
+# address (right for almost everyone). Set it when the game server has its
+# own address, e.g. a domain whose proxy forwards to GAME_PORT:
+#   GAME_URL=wss://game.example.com
+GAME_URL=
 
 # 1 = developer chat commands (/xp, /res, /tp, /event...)
 ROAMER_DEV=0
@@ -68,8 +67,11 @@ load_env() {
     set +a
     CLIENT_PORT="${CLIENT_PORT:-8081}"
     GAME_PORT="${GAME_PORT:-8082}"
-    POW_PORT="${POW_PORT:-8083}"
+    GAME_URL="${GAME_URL:-}"
     ROAMER_DEV="${ROAMER_DEV:-0}"
+    # What each service binds to.
+    CLIENT_BIND="[::]:$CLIENT_PORT"
+    GAME_BIND="[::]:$GAME_PORT"
 }
 
 check_port() {
@@ -83,24 +85,25 @@ check_port() {
 check_settings() {
     check_port CLIENT_PORT "$CLIENT_PORT"
     check_port GAME_PORT "$GAME_PORT"
-    check_port POW_PORT "$POW_PORT"
-    ((CLIENT_PORT != GAME_PORT && CLIENT_PORT != POW_PORT && GAME_PORT != POW_PORT)) ||
-        die "CLIENT_PORT, GAME_PORT and POW_PORT must all differ"
+    ((CLIENT_PORT != GAME_PORT)) || die "CLIENT_PORT and GAME_PORT must differ"
+    [[ -z "$GAME_URL" || "$GAME_URL" =~ ^wss?:// ]] || die "GAME_URL must start with ws:// or wss:// (or be blank)"
     [[ -x "$DIR/bin/roamer-server" && -x "$DIR/bin/roamer-client" ]] || die "missing binaries in $DIR/bin (run build_release.sh)"
     [[ -f "$DIR/web/index.html" ]] || die "missing the web client in $DIR/web (run build_release.sh)"
-    if [[ -n "${TLS_CERT:-}${TLS_KEY:-}" ]]; then
-        [[ -r "$TLS_CERT" && -r "$TLS_KEY" ]] || die "TLS_CERT / TLS_KEY must both point to readable PEM files (or leave both blank)"
-    fi
 }
 
 # Fails if something else already listens on our ports.
 check_ports_free() {
     command -v ss >/dev/null 2>&1 || return 0
     local busy
-    for p in "$CLIENT_PORT" "$GAME_PORT" "$POW_PORT"; do
+    for p in "$CLIENT_PORT" "$GAME_PORT"; do
         busy=$(ss -Htln "sport = :$p" 2>/dev/null || true)
         [[ -z "$busy" ]] || die "TCP port $p is already in use"
     done
+}
+
+# Tells the web page where the game is (blank = /ws on its own address).
+write_client_config() {
+    printf '{ "gameUrl": "%s" }\n' "$GAME_URL" >"$DIR/web/config.json"
 }
 
 # -------------------------------------------------------------------- run --
@@ -111,8 +114,7 @@ CLIENT_PID=""
 start_server() {
     (
         cd "$DATA"
-        GAME_PORT="$GAME_PORT" POW_PORT="$POW_PORT" CLIENT_ORIGIN="*" \
-            ROAMER_CONFIG="$DIR/config/config.toml" \
+        GAME_BIND="$GAME_BIND" ROAMER_CONFIG="$DIR/config/config.toml" \
             LOG_FILE="$LOGS/server.log" ACCOUNTS_FILE="$DATA/accounts.json" ROAMER_DEV="$ROAMER_DEV" \
             exec "$DIR/bin/roamer-server"
     ) >>"$LOGS/server.out" 2>&1 &
@@ -120,9 +122,7 @@ start_server() {
 }
 
 start_client() {
-    CLIENT_PORT="$CLIENT_PORT" WEB_ROOT="$DIR/web" \
-        GAME_ADDR="127.0.0.1:$GAME_PORT" POW_ADDR="127.0.0.1:$POW_PORT" \
-        TLS_CERT="${TLS_CERT:-}" TLS_KEY="${TLS_KEY:-}" \
+    CLIENT_BIND="$CLIENT_BIND" WEB_ROOT="$DIR/web" GAME_ADDR="127.0.0.1:$GAME_PORT" \
         "$DIR/bin/roamer-client" >>"$LOGS/client.log" 2>&1 &
     CLIENT_PID=$!
 }
@@ -139,10 +139,11 @@ cmd_run() {
     check_settings
     mkdir -p "$DATA" "$LOGS"
     check_ports_free
+    write_client_config
     trap 'stop_children; exit 0' INT TERM
     start_server
     start_client
-    say "Roamer.io is running on TCP $CLIENT_PORT (logs in $LOGS)"
+    say "Roamer.io is running: web page on $CLIENT_BIND, game on $GAME_BIND (logs in $LOGS)"
 
     while true; do
         sleep 5
@@ -155,6 +156,30 @@ cmd_run() {
             start_client
         fi
     done
+}
+
+# Does CLIENT_PORT answer with the web page?
+page_ok() {
+    local page
+    if command -v curl >/dev/null 2>&1; then
+        page=$(curl -fsS -m 3 "http://127.0.0.1:$CLIENT_PORT/" 2>/dev/null) || return 1
+    else
+        exec 3<>"/dev/tcp/127.0.0.1/$CLIENT_PORT" 2>/dev/null || return 1
+        printf 'GET / HTTP/1.0\r\nHost: localhost\r\n\r\n' >&3
+        page=$(timeout 3 cat <&3 2>/dev/null || true)
+        exec 3>&-
+    fi
+    [[ "$page" == *"<html"* ]]
+}
+
+# Waits up to 15 seconds for the web page to be served.
+wait_for_page() {
+    for _ in $(seq 30); do
+        page_ok && return 0
+        sleep 0.5
+    done
+    tail -n 5 "$LOGS/client.log" "$LOGS/server.out" "$LOGS/roamer.log" 2>/dev/null || true
+    die "port $CLIENT_PORT isn't serving the web page (see above, and $LOGS)"
 }
 
 # ----------------------------------------------------------- background --
@@ -224,6 +249,7 @@ cmd_start() {
             say "Started in the background."
         fi
     fi
+    wait_for_page
     cmd_status
 }
 
@@ -260,12 +286,23 @@ cmd_status() {
     elif running_pid >/dev/null; then
         running="yes (pid $(cat "$PID_FILE"))"
     fi
-    local scheme=http
-    [[ -n "${TLS_CERT:-}" ]] && scheme=https
+    local serving=no
+    page_ok && serving=yes
     say "Roamer.io"
     echo "  running:   $running"
-    echo "  play at:   $scheme://localhost:$CLIENT_PORT (or this machine's address / your domain)"
-    echo "  ports:     TCP $CLIENT_PORT (open this one); game TCP $GAME_PORT and challenge TCP $POW_PORT stay local"
+    echo "  web page:  $serving ($CLIENT_BIND)"
+    echo "  game:      $GAME_BIND, browsers connect to ${GAME_URL:-/ws on the web page}"
+    echo "  play at:   http://localhost:$CLIENT_PORT"
+    local ip ips
+    ips=$(hostname -I 2>/dev/null || true)
+    if [[ -z "$ips" ]] && command -v ip >/dev/null 2>&1; then
+        ips=$(ip -o addr show scope global 2>/dev/null | awk '{split($4, a, "/"); print a[1]}')
+    fi
+    for ip in $ips; do
+        [[ "$ip" == *:* ]] && ip="[$ip]"
+        echo "             http://$ip:$CLIENT_PORT"
+    done
+    echo "  firewall:  open TCP $CLIENT_PORT${GAME_URL:+ (and whatever GAME_URL points at)}"
     echo "  logs:      $LOGS"
 }
 

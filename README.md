@@ -89,7 +89,7 @@ chmod +x run_client.sh run_server.sh
 and open http://localhost:5173.
 
 `run_server.sh` builds an optimized server by default (use `--debug` for faster builds). Logs go to `server/server.log`.
-The ports can be changed with `GAME_PORT`, `POW_PORT` and `CLIENT_ORIGIN` for the server, and `CLIENT_PORT`, `VITE_GAME_PORT` and `VITE_POW_PORT` for the client.
+The ports can be changed with `GAME_PORT` for the server, and `CLIENT_PORT` and `VITE_GAME_PORT` for the client.
 
 Run the server with `ROAMER_DEV=1` to enable developer chat commands like `/xp`, `/res`, `/tp` and `/event`.
 
@@ -101,7 +101,7 @@ The `release/` folder holds a ready-to-run copy of the game: static binaries for
 ./build_release.sh   # build it (or rebuild after changes)
 ./release/roamer.sh  # set up and start, then open http://localhost:8081
 ```
-By default everything (the web page and the game) goes through TCP 8081, listening on `[::]` (IPv6 and IPv4). See [release/README.md](release/README.md) for ports, HTTPS and the other commands.
+By default everything (the web page and the game) goes through TCP 8081, listening on `[::]` (IPv6 and IPv4). See [release/README.md](release/README.md) for ports and the other commands.
 
 
 ## Controls

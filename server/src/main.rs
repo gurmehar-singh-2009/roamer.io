@@ -8,11 +8,7 @@ use std::{
 use bevy_ecs::{prelude::*, schedule::ScheduleBuildSettings};
 use dashmap::DashMap;
 use snafu::OptionExt;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
-    sync::mpsc as god,
-};
+use tokio::{net::TcpListener, sync::mpsc as god};
 use tokio_tungstenite::tungstenite::{
     handshake::server::{ErrorResponse, Request, Response},
     http::StatusCode,
@@ -98,7 +94,7 @@ async fn main() -> Result<(), GameError> {
 
     // Initialize PoW.
     let pow = Pow::new(4);
-    spawn_pow_server(&pow);
+    spawn_pow_sweeper(&pow);
 
     // Initialize one-time things.
     let mut rng = nanorand::WyRand::new();
@@ -122,13 +118,12 @@ async fn main() -> Result<(), GameError> {
     // Create an internal channel for game messages.
     let (input_tx, input_rx) = god::channel::<(u32, InternalGameMessages)>(1024);
 
-    // Players connect with WebSockets, on every interface, IPv6 and IPv4.
-    let server = TcpListener::bind(format!("[::]:{game_port}"))
-        .await
-        .ok()
-        .context(SystemPanicSnafu)?;
+    // Players connect with WebSockets, on every interface, IPv6 and IPv4
+    // (GAME_BIND overrides the address).
+    let addr = std::env::var("GAME_BIND").unwrap_or_else(|_| format!("[::]:{game_port}"));
+    let server = TcpListener::bind(&addr).await.ok().context(SystemPanicSnafu)?;
 
-    tracing::info!("Server listening on port {}", game_port);
+    tracing::info!("Server listening on {}", addr);
 
     spawn_accept_loop(
         server,
@@ -256,93 +251,16 @@ fn insert_resources(world: &mut bevy_ecs::world::World, config: Config) {
     world.insert_resource(GoldRemainder::default());
 }
 
-/// Starts the proof-of-work challenge HTTP endpoint and the task that sweeps
-/// old challenges.
-fn spawn_pow_server(pow: &Arc<Pow>) {
-    // Sweep PoW challenges periodically.
-    let pow_sweep = pow.clone();
+/// Starts the task that sweeps old proof-of-work challenges.
+fn spawn_pow_sweeper(pow: &Arc<Pow>) {
+    let pow = pow.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(300));
         loop {
             interval.tick().await;
-            pow_sweep.sweep();
+            pow.sweep();
         }
     });
-
-    // PoW HTTP endpoint.
-    let pow_http = pow.clone();
-    tokio::spawn(async move {
-        // Bind an endpoint for PoW challenges (port 3001 unless POW_PORT is
-        // set), on every interface. TODO: Add better security related to
-        // this endpoint.
-        let port = env_port("POW_PORT").unwrap_or(3001);
-        let addr = format!("[::]:{port}");
-        let listener = TcpListener::bind(addr).await.expect("failed to bind PoW endpoint");
-
-        loop {
-            // Accept a connection.
-            let Ok((socket, _)) = listener.accept().await else {
-                continue;
-            };
-            tokio::spawn(handle_pow_request(socket, pow_http.clone()));
-        }
-    });
-}
-
-/// Answers one HTTP request on the proof-of-work endpoint.
-async fn handle_pow_request(mut socket: TcpStream, pow: Arc<Pow>) {
-    // Initialize a buffer for reading the request.
-    let mut buf = [0u8; 512];
-    let Ok(n) = socket.read(&mut buf).await else {
-        return;
-    };
-
-    // Parse the request.
-    let req = std::str::from_utf8(&buf[..n]).unwrap_or("");
-
-    // Check if the request is a valid PoW challenge request.
-    // If not, return a 404 Not Found response.
-    if !req.starts_with("GET /challenge") {
-        let _ = socket.write_all(b"HTTP/1.1 404 Not Found\r\n\r\n").await;
-        return;
-    }
-
-    // Generate a PoW challenge.
-    let challenge = pow.generate_challenge();
-    tracing::info!("generated challenge: {}, map size: {}", challenge, pow.challenges.len());
-
-    // Return the challenge as a plain text response, to the page's origin if
-    // it's allowed. CLIENT_ORIGIN is a comma-separated list (or "*").
-    let allowed = std::env::var("CLIENT_ORIGIN").unwrap_or_else(|_| "http://localhost:5173".into());
-    let url = allowed_origin(req, &allowed);
-    let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nAccess-Control-Allow-Origin: \
-         {url}\r\n\r\n{challenge}",
-        challenge.len(),
-    );
-
-    // Send the response to the client.
-    let _ = socket.write_all(response.as_bytes()).await;
-}
-
-/// The `Access-Control-Allow-Origin` value for a request: its own `Origin`
-/// header when that's in the comma-separated `allowed` list (or the list is
-/// "*"), otherwise the first allowed origin.
-fn allowed_origin(req: &str, allowed: &str) -> String {
-    let origin = req
-        .lines()
-        .find_map(|l| {
-            let (name, value) = l.split_once(':')?;
-            name.trim()
-                .eq_ignore_ascii_case("origin")
-                .then(|| value.trim().to_string())
-        })
-        .unwrap_or_default();
-    let list: Vec<&str> = allowed.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
-    if !origin.is_empty() && (list.contains(&"*") || list.contains(&origin.as_str())) {
-        return origin;
-    }
-    list.first().map_or_else(|| "*".to_string(), |s| (*s).to_string())
 }
 
 /// Largest message a client may send.
@@ -389,14 +307,6 @@ fn spawn_accept_loop(
                     if systems::anticheat_system::is_blacklisted(&client_ip) {
                         return Err(forbidden());
                     }
-
-                    // Verify PoW.
-                    let query = req.uri().query().map_or_else(String::new, |q| format!("?{q}"));
-                    let nonce = extract_query_param(&query, "pow").unwrap_or_default();
-                    let challenge_key = extract_query_param(&query, "challenge").unwrap_or_default();
-                    if !pow.verify(&challenge_key, &nonce) {
-                        return Err(forbidden());
-                    }
                     Ok(res)
                 };
                 let config = WebSocketConfig::default()
@@ -412,7 +322,7 @@ fn spawn_accept_loop(
 
                 let player_id = next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 ips.insert(client_ip.clone(), 1);
-                net::handle_conn(ws, player_id, client_ip, &ips, connection_map, game_tx, input_map).await;
+                net::handle_conn(ws, &pow, player_id, client_ip, &ips, connection_map, game_tx, input_map).await;
             });
         }
     });
@@ -445,32 +355,4 @@ fn forbidden() -> ErrorResponse {
 /// Reads a port number from an environment variable.
 fn env_port(name: &str) -> Option<u16> {
     std::env::var(name).ok()?.parse().ok()
-}
-
-/// Returns the value of `key` in a URL query string.
-fn extract_query_param(path: &str, key: &str) -> Option<String> {
-    path.split('?')
-        .nth(1)?
-        .split('&')
-        .find(|p| p.starts_with(&format!("{key}=")))?
-        .split('=')
-        .nth(1)
-        .map(std::string::ToString::to_string)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::allowed_origin;
-
-    #[test]
-    fn origins_are_matched_against_the_list() {
-        let req = "GET /challenge HTTP/1.1\r\nHost: x\r\nOrigin: http://game.example:8081\r\n\r\n";
-        assert_eq!(allowed_origin(req, "*"), "http://game.example:8081");
-        assert_eq!(
-            allowed_origin(req, "http://localhost:5173, http://game.example:8081"),
-            "http://game.example:8081"
-        );
-        assert_eq!(allowed_origin(req, "http://localhost:5173"), "http://localhost:5173");
-        assert_eq!(allowed_origin("GET /challenge HTTP/1.1\r\n\r\n", ""), "*");
-    }
 }

@@ -6,17 +6,56 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::{tungstenite::Message, WebSocketStream};
 
 use crate::{
-    net::{handle_msgs::handle_msg, perform_handshake},
+    net::{handle_msgs::handle_msg, perform_handshake, pow::Pow},
     structs::bevy::{InputMap, PlayerConnection},
     ConnectionMap, GameChannel,
 };
 
 /// Longest a client may take to send its half of the handshake.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Longest a client may take to solve the proof-of-work challenge.
+const POW_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The next binary message, or None if the client hangs up or takes longer
+/// than `limit`.
+async fn next_binary(ws: &mut WebSocketStream<TcpStream>, limit: Duration) -> Option<Vec<u8>> {
+    tokio::time::timeout(limit, async {
+        while let Some(Ok(msg)) = ws.next().await {
+            if let Message::Binary(bytes) = msg {
+                return Some(bytes.to_vec());
+            }
+        }
+        None
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Makes the client solve a proof-of-work challenge: the server sends the
+/// challenge (text, as a binary message) and the client answers with the
+/// nonce. True if it was solved.
+async fn proof_of_work(ws: &mut WebSocketStream<TcpStream>, pow: &Pow) -> bool {
+    let challenge = pow.generate_challenge();
+    if ws
+        .send(Message::Binary(challenge.clone().into_bytes().into()))
+        .await
+        .is_err()
+    {
+        return false;
+    }
+    let Some(answer) = next_binary(ws, POW_TIMEOUT).await else {
+        return false;
+    };
+    let nonce = String::from_utf8_lossy(&answer);
+    pow.verify(&challenge, &nonce)
+}
 
 /// Runs one player's WebSocket connection until it closes.
+#[allow(clippy::too_many_arguments, reason = "each is a separate shared map or channel")]
 pub async fn handle_conn(
     mut ws: WebSocketStream<TcpStream>,
+    pow: &Pow,
     player_id: u32,
     client_ip: String,
     ips: &DashMap<String, u8>,
@@ -24,6 +63,14 @@ pub async fn handle_conn(
     game_tx: GameChannel,
     input_map: InputMap,
 ) {
+    // The client proves some work before anything else is done for it.
+    if !proof_of_work(&mut ws, pow).await {
+        tracing::info!("player {} failed the proof of work", player_id);
+        let _ = ips.remove(&client_ip);
+        let _ = ws.close(None).await;
+        return;
+    }
+
     // We need to verify that the client is not a bot. The lookups are
     // blocking HTTP requests, so they run on a blocking thread.
     let lookup_ip = client_ip.clone();
@@ -39,18 +86,7 @@ pub async fn handle_conn(
     }
 
     // The first binary message is the client's half of the handshake.
-    let hello = tokio::time::timeout(HANDSHAKE_TIMEOUT, async {
-        while let Some(Ok(msg)) = ws.next().await {
-            if let Message::Binary(bytes) = msg {
-                return Some(bytes);
-            }
-        }
-        None
-    })
-    .await
-    .ok()
-    .flatten();
-    let Some(hello) = hello else {
+    let Some(hello) = next_binary(&mut ws, HANDSHAKE_TIMEOUT).await else {
         tracing::error!("player {} sent no handshake", player_id);
         let _ = ips.remove(&client_ip);
         return;
