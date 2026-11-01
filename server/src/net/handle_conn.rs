@@ -17,27 +17,12 @@ pub async fn handle_conn(
     game_tx: GameChannel,
     input_map: InputMap,
 ) {
-    // We need to verify that the client is not a bot.
-    let mut is_bad_actor = false;
-
-    for provider in crate::net::ip_lookup::LookupProvider::all() {
-        if let Some(c) = &crate::net::ip_lookup::lookup(&client_ip, *provider) {
-            is_bad_actor |= [
-                c.connection.is_crawler,
-                c.connection.is_datacenter,
-                c.connection.is_vpn,
-                c.connection.is_proxy,
-                c.connection.is_tor,
-            ]
-            .into_iter()
-            .flatten()
-            .any(|v| v);
-
-            if is_bad_actor {
-                break;
-            }
-        }
-    }
+    // We need to verify that the client is not a bot. The lookups are
+    // blocking HTTP requests, so they run on a blocking thread.
+    let lookup_ip = client_ip.clone();
+    let is_bad_actor = tokio::task::spawn_blocking(move || is_bad_ip(&lookup_ip))
+        .await
+        .unwrap_or(false);
 
     if is_bad_actor {
         tracing::error!("Closed connection due to Anti bot service.");
@@ -73,7 +58,10 @@ pub async fn handle_conn(
     drop(recv_stream);
 
     // Store the new player entry.
-    connection_map.insert(player_id, PlayerConnection::new(connection.clone(), crypto.clone()));
+    connection_map.insert(
+        player_id,
+        PlayerConnection::new(connection.clone(), crypto.clone(), client_ip.clone()),
+    );
     tracing::info!("player {} connected - session encrypted", player_id);
 
     // let message_count = Arc::new(AtomicU8::new(0));
@@ -94,6 +82,25 @@ pub async fn handle_conn(
     //     }
     // });
 
+    // Reliable messages (everything but movement and aim) arrive on
+    // unidirectional streams as [length: u32 BE][encrypted packet] frames.
+    let stream_task = {
+        let connection = connection.clone();
+        let crypto = crypto.clone();
+        let game_tx = game_tx.clone();
+        let input_map = input_map.clone();
+        tokio::spawn(async move {
+            while let Ok(stream) = connection.accept_uni().await {
+                let crypto = crypto.clone();
+                let game_tx = game_tx.clone();
+                let input_map = input_map.clone();
+                tokio::spawn(async move {
+                    read_reliable(stream, &crypto, player_id, &game_tx, &input_map).await;
+                });
+            }
+        })
+    };
+
     // Message read loop.
     loop {
         // Process datagram messages.
@@ -107,8 +114,8 @@ pub async fn handle_conn(
 
         // message_count.fetch_add(1, Ordering::Relaxed);
 
-        // Discard invalid messages (less than 8 bytes is not possible with our message
-        // structure).
+        // Discard invalid messages (less than 8 bytes is not possible with our
+        // message structure).
         if datagram.len() < 8 {
             continue;
         }
@@ -141,7 +148,79 @@ pub async fn handle_conn(
     }
 
     tracing::info!("player {} disconnected", player_id);
-    
+
+    stream_task.abort();
+
+    // Forget the connection and tell the game loop, so the player is removed
+    // from the world.
+    connection_map.remove(&player_id);
+    let _ = game_tx
+        .send((player_id, crate::errors::InternalGameMessages::Disconnect))
+        .await;
+
     // Remove the IP from the map when the connection is closed.
     let _ = ips.remove(&client_ip);
+}
+
+/// Asks the IP lookup services whether an IP is a crawler, datacenter, VPN,
+/// proxy or Tor exit. Local and private addresses are never looked up.
+fn is_bad_ip(ip: &str) -> bool {
+    let is_local = match ip.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        Ok(std::net::IpAddr::V6(v6)) => v6.is_loopback() || v6.is_unique_local() || v6.is_unicast_link_local(),
+        Err(_) => true,
+    };
+    if is_local {
+        return false;
+    }
+
+    crate::net::ip_lookup::LookupProvider::all().iter().any(|provider| {
+        crate::net::ip_lookup::lookup(ip, *provider).is_some_and(|c| {
+            [
+                c.connection.is_crawler,
+                c.connection.is_datacenter,
+                c.connection.is_vpn,
+                c.connection.is_proxy,
+                c.connection.is_tor,
+            ]
+            .into_iter()
+            .flatten()
+            .any(|v| v)
+        })
+    })
+}
+
+/// Largest reliable frame accepted.
+const MAX_FRAME: usize = 64 * 1024;
+
+/// Reads framed, encrypted messages from a client's reliable stream.
+async fn read_reliable(
+    mut stream: wtransport::RecvStream,
+    crypto: &crate::net::SessionCrypto,
+    player_id: u32,
+    game_tx: &GameChannel,
+    input_map: &InputMap,
+) {
+    loop {
+        let mut len = [0u8; 4];
+        if stream.read_exact(&mut len).await.is_err() {
+            return;
+        }
+        let Ok(len) = usize::try_from(u32::from_be_bytes(len)) else {
+            return;
+        };
+        if len > MAX_FRAME {
+            return;
+        }
+        let mut packet = vec![0u8; len];
+        if stream.read_exact(&mut packet).await.is_err() {
+            return;
+        }
+        let Ok(plaintext) = crypto.decrypt_datagram(&packet) else {
+            continue;
+        };
+        if let Some((&opcode, body)) = plaintext.split_first() {
+            handle_msg(opcode, body, player_id, game_tx, input_map);
+        }
+    }
 }

@@ -1,44 +1,82 @@
-use shared::{to_client::ObjectTO, to_server::ClientMessages};
+//! Objects coming into view.
 
-use crate::{
-    broadcast,
-    structs::{
-        bevy::{IDToConnection, World},
-        visibility::{ObjSnapshot, PlayerKnowledge},
-    },
+use bevy_ecs::{entity::Entity, world::World};
+use shared::{
+    to_client::{AddObjectData, ObjectTO},
+    PacketType,
 };
 
-pub fn replicate_object(
-    obj: &[ObjSnapshot],
-    player_id: &u32,
-    (px, py): (&f32, &f32),
-    world: &mut bevy_ecs::world::World,
-    rt_handle: &tokio::runtime::Handle,
-    player_connections: &IDToConnection,
-) {
-    let new_objects: Vec<ObjectTO> = {
-        let mut knowledge = world.resource_mut::<PlayerKnowledge>();
-        knowledge
-            .drain_new_objects(*player_id, obj.iter(), *px, *py)
-            .into_iter()
-            .map(|o| ObjectTO {
-                id:       o.id,
-                x:        o.x,
-                y:        o.y,
-                dir:      o.dir,
-                scale:    o.scale,
-                type_obj: o.type_obj,
-            })
-            .collect()
-    };
+use crate::{
+    catalog::items::{item_def, ItemKind},
+    replication::in_view,
+    structs::{
+        components::{AimDir, Building, Health, ObjectEntity, ObjectKind, Position},
+        outbox::{Outbox, Target},
+        visibility::PlayerKnowledge,
+    },
+    systems::{social_system::are_allies, Collider},
+};
 
-    if !new_objects.is_empty() {
-        let msg = crate::net::serialization::encode(
-            7,
-            ClientMessages::AddObject(shared::to_client::AddObjectData { objects: new_objects }),
-        )
-        .unwrap();
+/// Owner id sent for objects nobody owns.
+pub const NO_OWNER: u32 = u32::MAX;
 
-        broadcast!(reliable_to, rt_handle, player_connections, *player_id, msg);
+/// Snapshot of every map object.
+pub fn object_snapshots(world: &mut World) -> Vec<ObjectTO> {
+    world
+        .query::<(
+            Entity,
+            &ObjectEntity,
+            &ObjectKind,
+            &Position,
+            &AimDir,
+            &Collider,
+            &Health,
+            Option<&Building>,
+        )>()
+        .iter(world)
+        .map(|(e, _, kind, pos, dir, col, health, building)| ObjectTO {
+            id:         e.index(),
+            x:          pos.0,
+            y:          pos.1,
+            dir:        dir.0,
+            scale:      col.rad,
+            type_obj:   kind.type_id(),
+            health:     health.0,
+            max_health: health.1,
+            owner:      building.map_or(NO_OWNER, |b| b.owner),
+        })
+        .collect()
+}
+
+/// Whether a player may see an object. Pit traps are hidden from enemies.
+fn may_see(world: &World, player: u32, obj: &ObjectTO) -> bool {
+    let is_trap = obj
+        .type_obj
+        .checked_sub(50)
+        .and_then(item_def)
+        .is_some_and(|i| i.kind == ItemKind::PitTrap);
+    !is_trap || obj.owner == player || are_allies(world, player, obj.owner)
+}
+
+/// Sends each player the objects that just came into their view.
+pub fn replicate_objects(world: &mut World, positions: &[(u32, f32, f32)]) {
+    let all = object_snapshots(world);
+
+    let mut sends = Vec::new();
+    for &(id, px, py) in positions {
+        let allowed: Vec<bool> = all.iter().map(|o| may_see(world, id, o)).collect();
+        let new_objects = world.resource_mut::<PlayerKnowledge>().drain_new_objects(
+            id,
+            all.iter().enumerate().filter(|(i, _)| allowed[*i]).map(|(_, o)| o),
+            |o| in_view(px, py, o.x, o.y),
+        );
+        if !new_objects.is_empty() {
+            sends.push((id, new_objects));
+        }
+    }
+
+    let mut out = world.resource_mut::<Outbox>();
+    for (id, objects) in sends {
+        out.send_reliable(Target::Player(id), PacketType::AddObject, &AddObjectData { objects });
     }
 }

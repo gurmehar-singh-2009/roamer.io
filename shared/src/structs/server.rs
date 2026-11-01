@@ -1,4 +1,3 @@
-use bevy_ecs::component::Component;
 #[cfg(feature = "web")]
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "web")]
@@ -11,7 +10,7 @@ use borsh_derive::{BorshDeserialize, BorshSerialize};
 use crate::structs::client::{JsGameObject, JsPlayer};
 
 #[derive(Debug, Clone, BorshDeserialize, BorshSerialize)]
-#[cfg_attr(feature = "server", derive(Component))]
+#[cfg_attr(feature = "server", derive(bevy_ecs::component::Component))]
 #[cfg_attr(feature = "web", derive(Serialize, Deserialize))]
 pub struct Player {
     pub name: String,
@@ -28,7 +27,8 @@ pub struct Player {
 }
 
 impl Player {
-    pub fn new(name: String, id: u32) -> Self {
+    #[must_use]
+    pub const fn new(name: String, id: u32) -> Self {
         Self {
             name,
             id,
@@ -65,7 +65,7 @@ impl From<JsPlayer> for Player {
 }
 
 #[derive(Debug, Clone, BorshDeserialize, BorshSerialize)]
-#[cfg_attr(feature = "server", derive(Component))]
+#[cfg_attr(feature = "server", derive(bevy_ecs::component::Component))]
 #[cfg_attr(feature = "web", derive(Serialize, Deserialize))]
 pub struct GameObject {
     pub id: u32,

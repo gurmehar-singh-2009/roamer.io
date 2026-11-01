@@ -3,46 +3,73 @@
 use serde::Serialize;
 
 #[derive(Serialize, Debug, Default)]
+/// Where the IP is.
 pub struct CountryInfo {
+    /// City name.
     pub city:     Option<String>,
+    /// Country code.
     pub code:     Option<String>,
+    /// Postal code.
     pub zip:      Option<String>,
+    /// Time zone name.
     pub timezone: Option<String>,
 }
 
 #[derive(Serialize, Debug, Default)]
+/// Coordinates of the IP.
 pub struct LocationInfo {
+    /// Latitude in degrees.
     pub latitude:  Option<f64>,
+    /// Longitude in degrees.
     pub longitude: Option<f64>,
 }
 
 #[derive(Serialize, Debug, Default)]
+// Field names match the lookup API's JSON.
+#[allow(clippy::struct_field_names)]
+/// What kind of connection the IP is.
 pub struct ConnectionInfo {
+    /// Is a proxy.
     pub is_proxy:      Option<bool>,
+    /// Is a Tor exit node.
     pub is_tor:        Option<bool>,
+    /// Is a crawler.
     pub is_crawler:    Option<bool>,
+    /// Is in a datacenter.
     pub is_datacenter: Option<bool>,
+    /// Is a VPN.
     pub is_vpn:        Option<bool>,
 }
 
 #[derive(Serialize, Debug, Default)]
+/// Who owns the IP.
 pub struct NetworkInfo {
+    /// The IP address.
     pub ip:  Option<String>,
+    /// Internet service provider.
     pub isp: Option<String>,
+    /// Organization.
     pub org: Option<String>,
+    /// Autonomous system number.
     pub asn: Option<String>,
 }
 
 #[derive(Serialize, Debug, Default)]
+/// Everything a lookup found. Fields a provider doesn't return are `None`.
 pub struct LookupResult {
+    /// Location names.
     pub country:    CountryInfo,
+    /// Coordinates.
     pub location:   LocationInfo,
+    /// Proxy/VPN/datacenter flags.
     pub connection: ConnectionInfo,
+    /// Owner.
     pub network:    NetworkInfo,
 }
 
+/// Looks up an IP with ipinfo.io.
 pub fn lookup_with_ipinfo(ip: &str) -> Option<LookupResult> {
-    let url = format!("https://ipinfo.io/lookup/{}", ip);
+    let url = format!("https://ipinfo.io/lookup/{ip}");
     let resp = reqwest::blocking::get(url).ok()?.json::<serde_json::Value>().ok()?;
 
     let loc_str = resp.get("loc").and_then(|v| v.as_str()).unwrap_or("");
@@ -99,8 +126,9 @@ pub fn lookup_with_ipinfo(ip: &str) -> Option<LookupResult> {
 //     })
 // }
 
+/// Looks up an IP with ip.sb.
 pub fn lookup_with_ipsb(ip: &str) -> Option<LookupResult> {
-    let url = format!("https://api.ip.sb/geoip/{}", ip);
+    let url = format!("https://api.ip.sb/geoip/{ip}");
     let resp = reqwest::blocking::get(&url).ok()?.json::<serde_json::Value>().ok()?;
 
     Some(LookupResult {
@@ -111,15 +139,15 @@ pub fn lookup_with_ipsb(ip: &str) -> Option<LookupResult> {
             timezone: resp.get("timezone").and_then(|v| v.as_str()).map(String::from),
         },
         location:   LocationInfo {
-            latitude:  resp.get("latitude").and_then(|v| v.as_f64()),
-            longitude: resp.get("longitude").and_then(|v| v.as_f64()),
+            latitude:  resp.get("latitude").and_then(serde_json::Value::as_f64),
+            longitude: resp.get("longitude").and_then(serde_json::Value::as_f64),
         },
         connection: ConnectionInfo::default(),
         network:    NetworkInfo {
             ip:  resp.get("ip").and_then(|v| v.as_str()).map(String::from),
             isp: resp.get("isp").and_then(|v| v.as_str()).map(String::from),
             org: resp.get("organization").and_then(|v| v.as_str()).map(String::from),
-            asn: resp.get("asn").map(|v| v.to_string()),
+            asn: resp.get("asn").map(std::string::ToString::to_string),
         },
     })
 }
@@ -162,8 +190,9 @@ pub fn lookup_with_ipsb(ip: &str) -> Option<LookupResult> {
 //     })
 // }
 
+/// Looks up an IP with apip.cc.
 pub fn lookup_with_apipcc(ip: &str) -> Option<LookupResult> {
-    let url = format!("https://apip.cc/api-json/{}", ip);
+    let url = format!("https://apip.cc/api-json/{ip}");
     let resp = reqwest::blocking::get(&url).ok()?.json::<serde_json::Value>().ok()?;
 
     if resp.get("status")?.as_str()? != "success" {
@@ -197,8 +226,9 @@ pub fn lookup_with_apipcc(ip: &str) -> Option<LookupResult> {
     })
 }
 
+/// Looks up an IP with ipapi.is.
 pub fn lookup_with_ipapiis(ip: &str) -> Option<LookupResult> {
-    let url = format!("https://api.ipapi.is/?q={}", ip);
+    let url = format!("https://api.ipapi.is/?q={ip}");
     let resp = reqwest::blocking::get(url).ok()?.json::<serde_json::Value>().ok()?;
 
     let location = resp.get("location")?;
@@ -213,15 +243,15 @@ pub fn lookup_with_ipapiis(ip: &str) -> Option<LookupResult> {
             timezone: location.get("timezone").and_then(|v| v.as_str()).map(String::from),
         },
         location:   LocationInfo {
-            latitude:  location.get("latitude").and_then(|v| v.as_f64()),
-            longitude: location.get("longitude").and_then(|v| v.as_f64()),
+            latitude:  location.get("latitude").and_then(serde_json::Value::as_f64),
+            longitude: location.get("longitude").and_then(serde_json::Value::as_f64),
         },
         connection: ConnectionInfo {
-            is_proxy:      resp.get("is_proxy").and_then(|v| v.as_bool()),
-            is_tor:        resp.get("is_tor").and_then(|v| v.as_bool()),
-            is_crawler:    resp.get("is_crawler").and_then(|v| v.as_bool()),
-            is_datacenter: resp.get("is_datacenter").and_then(|v| v.as_bool()),
-            is_vpn:        resp.get("is_vpn").and_then(|v| v.as_bool()),
+            is_proxy:      resp.get("is_proxy").and_then(serde_json::Value::as_bool),
+            is_tor:        resp.get("is_tor").and_then(serde_json::Value::as_bool),
+            is_crawler:    resp.get("is_crawler").and_then(serde_json::Value::as_bool),
+            is_datacenter: resp.get("is_datacenter").and_then(serde_json::Value::as_bool),
+            is_vpn:        resp.get("is_vpn").and_then(serde_json::Value::as_bool),
         },
         network:    NetworkInfo {
             ip:  resp.get("ip").and_then(|v| v.as_str()).map(String::from),
@@ -234,7 +264,7 @@ pub fn lookup_with_ipapiis(ip: &str) -> Option<LookupResult> {
                 .and_then(|v| v.get("name"))
                 .and_then(|v| v.as_str())
                 .map(String::from),
-            asn: asn.get("asn").map(|v| v.to_string()),
+            asn: asn.get("asn").map(std::string::ToString::to_string),
         },
     })
 }

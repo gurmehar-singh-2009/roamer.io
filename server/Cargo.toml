@@ -2,6 +2,12 @@
 name = "server"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
+description.workspace = true
+keywords.workspace = true
+repository.workspace = true
+readme = "../README.md"
+categories.workspace = true
 
 [dependencies]
 config = { version = "0.15.19", features = ["toml"] }
@@ -28,19 +34,14 @@ pqc_kyber = { version = "0.7.1", features = ["kyber768", "90s"] }
 hkdf = "0.12.4"
 nanorand = { version = "0.8.0", features = ["wyrand", "chacha"] }
 once_cell = "1.21.3"
-crossterm = "0.28"
 mimalloc = { version = "0.1.49", features = ["secure"] }
 rustrict = "0.7.38"
 rstar = "0.12.2"
-reqwest = { version = "0.13.3", features = ["blocking", "json"] }
+# TLS through rustls with the `ring` backend (already used by wtransport), so
+# the server builds as a static musl binary without a C toolchain for aws-lc.
+reqwest = { version = "0.13.3", default-features = false, features = ["blocking", "json", "charset", "http2", "rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 serde_json = "1.0.150"
 
-[profile.release]
-opt-level = 3
-lto = "thin"
-codegen-units = 1
-debug = false
-overflow-checks = false
-incremental = false
-panic = "abort"
-strip = "debuginfo"
+[lints]
+workspace = true

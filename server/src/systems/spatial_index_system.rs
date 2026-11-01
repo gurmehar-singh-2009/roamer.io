@@ -1,6 +1,5 @@
 use bevy_ecs::{
     entity::Entity,
-    query::With,
     resource::Resource,
     system::{Query, Res, ResMut},
 };
@@ -9,13 +8,15 @@ use rstar::{RTree, RTreeObject, AABB};
 use crate::{
     structs::{
         bevy::PlayerMap,
-        components::{AnimalEntity, AnimalType, Position, Velocity},
+        components::{AnimalEntity, Position, Velocity},
         spatial_index::{EntityPoint, GlobalSpatialIndex},
     },
     systems::Collider,
 };
 
 /// System that will build the spatial hash once per tick.
+// Bevy systems take their parameters by value.
+#[allow(clippy::needless_pass_by_value)]
 pub fn build_spatial_index_system(
     player_map: Res<PlayerMap>,
     all_positions: Query<(Entity, &Position, &Collider)>,
@@ -43,7 +44,9 @@ pub fn build_spatial_index_system(
 /// `index` is the position of this fish inside `FishSpatialIndex::snapshots`.
 #[derive(Clone, Copy)]
 pub struct FishPoint {
+    /// Position.
     pub pos:   [f32; 2],
+    /// Index into `FishSpatialIndex::snapshots`.
     pub index: usize,
 }
 
@@ -56,33 +59,33 @@ impl RTreeObject for FishPoint {
 }
 
 #[derive(Resource, Default)]
+/// R-tree of all fish, used for flocking.
 pub struct FishSpatialIndex {
-    pub snapshots: Vec<(Velocity, Position, AnimalType)>,
+    /// (velocity, position) of every fish.
+    pub snapshots: Vec<(Velocity, Position)>,
+    /// The tree.
     pub tree:      RTree<FishPoint>,
 }
 
 /// Rebuilds `FishSpatialIndex` every tick from the live ECS fish entities.
 pub fn build_fish_spatial_index_system(
-    query: Query<(&Position, &Velocity, &AnimalType), With<AnimalEntity>>,
+    query: Query<(&Position, &Velocity, &AnimalEntity)>,
     mut fish_index: ResMut<FishSpatialIndex>,
 ) {
-    // Collect (velocity, position, type) snapshots for every fish.
-    let snapshots: Vec<(Velocity, Position, AnimalType)> = query
+    // Collect (velocity, position) snapshots for every fish.
+    let snapshots: Vec<(Velocity, Position)> = query
         .iter()
-        .filter_map(|(pos, vel, atype)| {
-            if matches!(atype, AnimalType::Fish) {
-                Some((*vel, *pos, *atype))
-            } else {
-                None
-            }
+        .filter(|(.., a)| {
+            crate::catalog::animals::animal(a.0).is_some_and(|d| d.behavior == crate::catalog::animals::Behavior::Fish)
         })
+        .map(|(pos, vel, _)| (*vel, *pos))
         .collect();
 
     // Build the R-tree so boid neighbours can be found in O(log n).
     let points: Vec<FishPoint> = snapshots
         .iter()
         .enumerate()
-        .map(|(i, (_, pos, _))| FishPoint {
+        .map(|(i, (_, pos))| FishPoint {
             pos:   [pos.0, pos.1],
             index: i,
         })

@@ -17,79 +17,27 @@ use x25519_dalek::{EphemeralSecret, PublicKey};
 use crate::errors::{EncryptionSnafu, GameError, HKDFExpansionFailureSnafu, WriteSliceSnafu};
 use crate::errors::{FaultyMessageSnafu, ReadSliceSnafu};
 
+/// Per-connection task.
 mod handle_conn;
+/// Packet encoding and decoding.
 pub mod serialization;
 pub use handle_conn::handle_conn;
+/// IP address lookups (for detecting bots).
 pub mod ip_lookup;
+/// Proof-of-work challenges.
 pub mod pow;
 
 use crate::CONFIG;
+/// Handling packets from clients.
 mod handle_msgs;
-
-#[macro_export]
-/// Macro that combined several broadcast functions.
-macro_rules! broadcast {
-    ($rt:expr, $connections:expr, $msg:expr) => {{
-        let connections = $connections.clone();
-        let msg = $msg;
-        $rt.spawn(async move {
-            World::broadcast(&msg, &connections).await;
-        });
-    }};
-    (reliable, $rt:expr, $connections:expr, $msg:expr) => {{
-        let connections = $connections.clone();
-        let msg = $msg;
-        $rt.spawn(async move {
-            World::broadcast_reliable(&msg, &connections).await;
-        });
-    }};
-    (to, $rt:expr, $connections:expr, $id:expr, $msg:expr) => {{
-        let connections = $connections.clone();
-        let msg = $msg;
-        let id = $id;
-        $rt.spawn(async move {
-            World::send_to(id, &msg, &connections).await;
-        });
-    }};
-    (reliable_to, $rt:expr, $connections:expr, $id:expr, $msg:expr) => {{
-        let connections = $connections.clone();
-        let msg = $msg;
-        let id = $id;
-        $rt.spawn(async move {
-            World::send_reliable_to(id, &msg, &connections).await;
-        });
-    }};
-    (except, $rt:expr, $connections:expr, $exceptions:expr, $msg:expr) => {{
-        let connections = $connections.clone();
-        let msg = $msg;
-        let exceptions = $exceptions;
-        $rt.spawn(async move {
-            World::broadcast_with_exceptions(&exceptions, &msg, &connections).await;
-        });
-    }};
-    (nearby, $rt:expr, $connections:expr, $index:expr, $origin:expr, $radius:expr, $msg:expr) => {{
-        let nearby_ids: Vec<u32> = $index.nearby_player_ids($origin, $radius);
-        let connections = $connections.clone();
-        let msg = $msg;
-
-        // Spawn one send task per nearby player. Each task gets its own copy of
-        // the message bytes.
-        for id in nearby_ids {
-            if let Some(conn) = connections.get(&id).map(|e| e.value().clone()) {
-                let data = msg.clone();
-                $rt.spawn(async move {
-                    let _ = conn.send_encrypted(&data).await;
-                });
-            }
-        }
-    }};
-}
 
 #[derive(BorshSerialize, BorshDeserialize)]
 /// Struct that represents the initial server-sent public key.
 /// Contains the x25519 public key and the kyber public key.
 struct ClientHello {
+    /// Client x25519 public key.
     x25519_pk: [u8; 32],
+    /// Client Kyber public key.
     kyber_pk:  Vec<u8>,
 }
 
@@ -97,18 +45,23 @@ struct ClientHello {
 /// Struct that represents the initial client-sent msg.
 /// Contains the x25519 public key and the kyber ciphertext.
 struct ServerHello {
+    /// Server x25519 public key.
     x25519_pk: [u8; 32],
+    /// Kyber ciphertext encapsulated to the client's key.
     kyber_ct:  Vec<u8>,
 }
 
 #[derive(Clone)]
+/// An established encrypted session with one client.
 pub struct SessionCrypto {
+    /// Cipher keyed with the session key.
     pub cipher:     Arc<ChaCha20Poly1305>,
+    /// Nonce for the next outgoing packet.
     pub send_nonce: Arc<AtomicU64>,
 }
 
 impl SessionCrypto {
-    /// Initializes a new SessionCrypto, takes the key as argument.
+    /// Initializes a new `SessionCrypto`, takes the key as argument.
     pub fn new(key: [u8; 32]) -> Self {
         let key = Key::from_slice(&key);
         Self {
@@ -152,6 +105,7 @@ impl SessionCrypto {
         Ok(packet)
     }
 
+    /// Decrypts a `[nonce (8 bytes) | ciphertext]` datagram.
     pub fn decrypt_datagram(&self, datagram: &[u8]) -> Result<Vec<u8>, chacha20poly1305::Error> {
         // If the data is too small, it cannot be a valid message.
         if datagram.len() < 24 {
@@ -169,6 +123,7 @@ impl SessionCrypto {
         self.cipher.decrypt(&nonce, ciphertext)
     }
 
+    /// Nonce of the next outgoing packet.
     pub fn send_nonce(&self) -> u64 {
         self.send_nonce.load(Ordering::Relaxed)
     }
@@ -178,15 +133,15 @@ impl SessionCrypto {
 /// Performs a hybrid post-quantum handshake with the client.
 /// The server generates an Ephemeral key (one time use), and we derive a public
 /// key from it. Client does the same, we get their public key through
-/// 'ClientHello'. In other words: combines x25519 and kyber.
+/// '`ClientHello`'. In other words: combines x25519 and kyber.
 pub async fn perform_handshake(send: &mut SendStream, recv: &mut RecvStream) -> Result<SessionCrypto, GameError> {
     // Create the key.
     let server_secret = EphemeralSecret::random_from_rng(OsRng);
     // Derive a public key.
     let server_public = PublicKey::from(&server_secret);
 
-    // Messages are length-prefixed: first 4 bytes tell us how many bytes to read
-    // next. This is necessary because streams have no built-in message
+    // Messages are length-prefixed: first 4 bytes tell us how many bytes to
+    // read next. This is necessary because streams have no built-in message
     // boundaries.
     let mut len_buf = [0u8; 4];
     recv.read_exact(&mut len_buf).await.ok().context(ReadSliceSnafu)?;
@@ -217,8 +172,8 @@ pub async fn perform_handshake(send: &mut SendStream, recv: &mut RecvStream) -> 
     }
 
     // 'encapsulate' does 2 things.
-    // It generates a random shared secret, and it encrypts that secret using the
-    // client's public key.
+    // It generates a random shared secret, and it encrypts that secret using
+    // the client's public key.
     let (kyber_ciphertext, kyber_shared_secret) = pqc_kyber::encapsulate(&client_hello.kyber_pk, &mut OsRng).unwrap();
 
     // We combine both x25519 and Kyber.
@@ -232,7 +187,8 @@ pub async fn perform_handshake(send: &mut SendStream, recv: &mut RecvStream) -> 
 
     // We use HKDF (HMAC-based Key Derivation Function) to combine the secrets.
     // It also:
-    // - Takes the raw combined secret, and hashes it into a uniformly random value.
+    // - Takes the raw combined secret, and hashes it into a uniformly random
+    //   value.
     // - It expands to fill the necessary bytes.
 
     let hkdf = Hkdf::<Sha256>::new(None, &combined_secret);
@@ -252,7 +208,10 @@ pub async fn perform_handshake(send: &mut SendStream, recv: &mut RecvStream) -> 
 
     // We send it to the client.
     let response_bytes = borsh::to_vec(&server_hello).context(EncryptionSnafu)?;
-    let len_bytes = (response_bytes.len() as u32).to_be_bytes();
+    let len_bytes = u32::try_from(response_bytes.len())
+        .ok()
+        .context(WriteSliceSnafu)?
+        .to_be_bytes();
     send.write_all(&len_bytes).await.ok().context(WriteSliceSnafu)?;
     send.write_all(&response_bytes).await.ok().context(WriteSliceSnafu)?;
 

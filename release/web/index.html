@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+   <meta charset="UTF-8">
+   <title>Roamer.io</title>
+   <meta name="viewport"
+      content="width=device-width, height=device-height, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no, viewport-fit=cover">
+   <meta name="description" content="Roamer.io is a free multiplayer survival game">
+   <meta name="keywords" content="game,games,pubg,battleground,royale,fortnite,gaming,online,io,multiplayer,free">
+   <meta http-equiv="Cache-control" content="public">
+   <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+
+  <script type="module" crossorigin src="/assets/index-CPCwKlba.js"></script>
+  <link rel="modulepreload" crossorigin href="/assets/colorToUniform-httQlrui.js">
+  <link rel="modulepreload" crossorigin href="/assets/FederatedEventTarget-ByTUhKVr.js">
+  <link rel="modulepreload" crossorigin href="/assets/CanvasPool-BFR4Yd26.js">
+  <link rel="modulepreload" crossorigin href="/assets/CanvasTextSystem-DsXl9VZn.js">
+  <link rel="modulepreload" crossorigin href="/assets/SharedSystems-DRLLp05R.js">
+  <link rel="modulepreload" crossorigin href="/assets/WebGLRenderer-CL2-buce.js">
+  <link rel="modulepreload" crossorigin href="/assets/WebGPURenderer-Bv3e1YDF.js">
+  <link rel="stylesheet" crossorigin href="/assets/index-YymJCNrB.css">
+</head>
+
+<body>
+      <input id="chatbox" placeholder="enter chat..." maxlength="30" />
+
+   <!-- MAIN CANVAS -->
+   <canvas id="mainCanvas" oncontextmenu="return false;"></canvas>
+   <!-- VIGNETTE -->
+   <img id="vignette" src="/assets/vignette-Bj2K30rT.png" />
+   <!-- DARKENER -->
+   <div id="darkener"></div>
+   <!-- LOADING CONTAINER -->
+   <div id="loadingContainer">
+      <div id="loadingText">Loading...</div>
+      <div id="loadingSubtext"></div>
+      <div id="reloadButton" class="menuButton" onclick="location.reload()" style="display:none">Reload</div>
+   </div>
+   <!-- SETTINGS CONTAINER -->
+   <div id="settingsContainer">
+      <div class="settingsIcon" onclick="showPanel('shop')" title="Shop (B)">
+         <i class="material-icons" style="color:#fff;font-size:45px">shopping_cart</i>
+      </div>
+      <div class="settingsIcon" onclick="showPanel('clan')" title="Clan (C)">
+         <i class="material-icons" style="color:#fff;font-size:45px">groups</i>
+      </div>
+      <div class="settingsIcon" onclick="showPanel('arena')" title="Arena (V)">
+         <i class="material-icons" style="color:#fff;font-size:45px">sports_kabaddi</i>
+      </div>
+      <div class="settingsIcon" onclick="showLeaderboard()" title="Leaderboard">
+         <i class="material-icons" style="color:#fff;font-size:45px">&#xE24B;</i>
+      </div>
+      <div class="settingsIcon" onclick="window.showInfoScreen(4)" title="Settings">
+         <i class="material-icons" style="color:#fff;font-size:45px">&#xE8B8;</i>
+      </div>
+      <div id="soundSetting" style="display: inline-block" onclick="toggleSound();"></div>
+   </div>
+   <!-- SHARED UI -->
+   <div id="sharedUI">
+      <div id="topMenuContainer">
+      </div>
+      <canvas id="minimap"></canvas>
+   </div>
+
+   <!-- SPECTATE UI -->
+   <div id="spectateContainer">
+      <div id="deathMessage"></div>
+      <div id="gameOverMessage"></div>
+      <div id="roundInfo">
+         <div id="rankCount"></div>
+         <div id="tokenCount"></div>
+      </div>
+      <div id="endButtonHolder">
+         <div id="playAgainButton" class="endButton" style="margin-right:20px">Play Again</div>
+         <div id="exitButton" class="endButton">Exit to Lobby</div>
+      </div>
+   </div>
+   
+   <!-- GAME UI -->
+   <div id="uiContainer">
+      <div id="ammoDisplay">Ammo</div>
+      <div id="infoDisplay"></div>
+      <div id="killTextCont">
+         <div id="killText"></div>
+         <div id="killInfo"></div>
+      </div>
+      <div id="staminaDisplay">
+         <div id="effectsList"></div>
+         <canvas id="staminaHolder"></canvas>
+      </div>
+   </div>
+   
+   <!-- MAIN MENU -->
+   <div id="mainMenuContainer" style="display:none">
+      <div id="gameName">Roamer.io</div>
+      <div class="mainMenuSub" id="adParent">
+         <div class="menuCard" id="adCard" style="text-align:left"></div>
+      </div>
+      <div class="mainMenuSub" id="buttonCardParent">
+         <div class="menuCard" id="buttonCard">
+            <div id="nameInputParent">
+               <input type="text" id="nameInput" maxlength="16" placeholder="Enter Name"
+                  ontouchend="touchPrompt(event, 'Enter username:')" autofocus></input>
+               <div class="menuButton" id="goButton">
+                  <i class="material-icons" style="color:#fff;font-size:32px;">&#xE037;</i>
+               </div>
+            </div>
+            <div class="menuButton" style="margin-top:10px" onclick="window.showInfoScreen(0)">Customize</div>
+            <div class="menuButton" style="margin-top:10px" onclick="showInfoScreen(1)">Servers</div>
+            <div class="menuButton" style="margin-top:10px" onclick="showInfoScreen(2)">Account</div>
+            <div class="menuButton" style="margin-top:10px" onclick="showInfoScreen(3)">How to Play</div>
+            <!-- <div class="menuButton" style="margin-top:10px" onclick="location.reload()">Reload</div> -->
+         </div>
+      </div>
+      <div class="mainMenuSub" id="infoCardParent">
+         <div class="menuCard" id="infoCard" style="text-align:left;max-height:250px;overflow-y:scroll"></div>
+      </div>
+   </div>
+   <!-- IN-GAME PANEL (shop, clan, arena, chest) -->
+   <div id="gamePanel" class="menuCard"></div>
+   <!-- CHEST (shown next to your chest) -->
+   <div id="chestCard" class="menuCard"></div>
+   <!-- HOVER INFO -->
+   <div id="hoverDisplay"></div>
+</body>
+
+</html>

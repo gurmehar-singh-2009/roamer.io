@@ -1,0 +1,22 @@
+[package]
+name = "roamer-client"
+version = "0.1.0"
+edition = "2024"
+description = "Serves the built Roamer.io web client."
+license.workspace = true
+repository.workspace = true
+categories.workspace = true
+keywords = ["game", "multiplayer", "server", "static", "http"]
+readme = "../../README.md"
+
+[[bin]]
+name = "roamer-client"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1.48.0", features = ["rt-multi-thread", "macros", "net", "io-util", "fs", "time"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+
+[lints]
+workspace = true

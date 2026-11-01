@@ -343,3 +343,9 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# Release folder: files roamer.sh makes when it runs
+release/roamer.env
+release/data/
+release/logs/
+release/web/config.json

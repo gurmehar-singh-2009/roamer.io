@@ -1,41 +1,44 @@
-use shared::to_client::{PlayerTO, UpdatePlayerData};
+//! Player positions.
+
+use bevy_ecs::world::World;
+use shared::{
+    to_client::{PlayerTO, UpdatePlayerData},
+    PacketType,
+};
 
 use crate::{
-    broadcast,
+    replication::{chunk_by_size, in_view, player_to, underground_players},
     structs::{
-        bevy::{IDToConnection, PlayerMap, World},
-        components::{AimDir, Health, Name, Position},
+        bevy::PlayerMap,
+        outbox::{Outbox, Target},
     },
 };
 
-pub fn replicate_players(
-    world: &bevy_ecs::world::World,
-    player_map: &PlayerMap,
-    rt_handle: &tokio::runtime::Handle,
-    player_connections: &IDToConnection,
-) {
-    let updates: Vec<PlayerTO> = player_map
+/// Sends each player the state of the players in their view.
+pub fn replicate_players(world: &mut World, positions: &[(u32, f32, f32)]) {
+    let all: Vec<PlayerTO> = world
+        .resource::<PlayerMap>()
         .map
-        .iter()
-        .filter_map(|(i, &entity)| {
-            let name = world.get::<Name>(entity)?;
-            let pos = world.get::<Position>(entity)?;
-            let aim = world.get::<AimDir>(entity)?;
-            let health = world.get::<Health>(entity)?;
-            Some(PlayerTO {
-                id:           *i,
-                name:         name.0.clone(),
-                x:            pos.0,
-                y:            pos.1,
-                aim:          aim.0,
-                health:       health.0,
-                weapon_index: Some(0),
-            })
-        })
+        .values()
+        .filter_map(|&e| player_to(world, e))
         .collect();
+    let underground = underground_players(world);
 
-    if !updates.is_empty() {
-        let msg = crate::net::serialization::encode(3, UpdatePlayerData { players: updates }).unwrap();
-        broadcast!(rt_handle, player_connections, msg);
+    let mut out = world.resource_mut::<Outbox>();
+    for &(id, px, py) in positions {
+        // Players in the caves and on the surface can't see each other.
+        let layer = underground.contains(&id);
+        let visible: Vec<PlayerTO> = all
+            .iter()
+            .filter(|p| p.id == id || (p.underground == layer && in_view(px, py, p.x, p.y)))
+            .cloned()
+            .collect();
+        for players in chunk_by_size(&visible) {
+            out.send(
+                Target::Player(id),
+                PacketType::UpdatePlayers,
+                &UpdatePlayerData { players },
+            );
+        }
     }
 }

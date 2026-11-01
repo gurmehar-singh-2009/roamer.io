@@ -2,16 +2,25 @@
 name = "shared"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
+description.workspace = true
+keywords.workspace = true
+repository.workspace = true
+readme = "../README.md"
+categories.workspace = true
 
 [dependencies]
 borsh = "1.6.0"
 borsh-derive = "1.6.0"
 
-bevy_ecs = "0.17.3"
-wasm-bindgen = { version = "0.2.106", optional = true }
-serde = "1.0.228"
+serde = { version = "1.0.228", features = ["derive"], optional = true }
 
 [features]
 default = []
+# Kept so dependents can still name them; the protocol is the same on both sides.
 server = []
-web = ["wasm-bindgen"]
+# Adds serde derives for the WASM parser.
+web = ["dep:serde"]
+
+[lints]
+workspace = true

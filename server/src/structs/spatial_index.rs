@@ -3,15 +3,18 @@ use rstar::{RTree, RTreeObject, AABB};
 
 /// A point in the global spatial index covering every entity with a position.
 /// The envelope is sized to the entity's collision radius so that
-/// locate_in_envelope_intersecting correctly finds potentially-overlapping
+/// `locate_in_envelope_intersecting` correctly finds potentially-overlapping
 /// pairs without any extra distance math at query time.
 #[derive(Clone, Copy)]
 pub struct EntityPoint {
+    /// Position.
     pub pos:          [f32; 2],
+    /// Entity index.
     pub entity_index: u32,
     /// Only Some if this entity is a connected player.
     #[allow(dead_code)]
     pub player_id:    Option<u32>,
+    /// Collider radius.
     pub radius:       f32,
 }
 
@@ -30,7 +33,9 @@ impl RTreeObject for EntityPoint {
 }
 
 #[derive(Resource, Default)]
+/// R-tree of every entity with a position and collider. Rebuilt every tick.
 pub struct GlobalSpatialIndex {
+    /// The tree.
     pub tree: RTree<EntityPoint>,
 }
 
@@ -53,7 +58,7 @@ impl GlobalSpatialIndex {
                 let id = pt.player_id?;
                 let dx = pt.pos[0] - origin.0;
                 let dy = pt.pos[1] - origin.1;
-                if dx * dx + dy * dy <= radius_sq {
+                if dy.mul_add(dy, dx * dx) <= radius_sq {
                     Some(id)
                 } else {
                     None

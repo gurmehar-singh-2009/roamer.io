@@ -1,7 +1,8 @@
 [game]
 hkdf_key = "agartha"
 port = 6767
-idle_timeout_mins = 30
+# Drop connections that go silent this long (the server pings every 5 s).
+idle_timeout_secs = 20
 
 [map]
 size = 16384
@@ -16,7 +17,7 @@ lava_start = 12288
 lava_end = 16384
 # x
 ocean_start_x = 10240
-ocean_end_x = 16384
+ocean_end_x = 14848
 
 [players]
 # need to fix these..
@@ -24,8 +25,8 @@ update_dt = 0.45
 player_max_speed = 45.0
 player_acceleration = 120.0
 player_friction = 90.0
-view_radius = 1024.0
-view_radius_sq = 1048576.0
+view_radius = 1400.0
+view_radius_sq = 1960000.0
 
 [entities]
 # objects

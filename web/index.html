@@ -3,11 +3,10 @@
 
 <head>
    <meta charset="UTF-8">
-   <title>Foes.io</title>
-   <link rel="shortcut icon" type="image/png" href="/web/20190120075244im_/https://foes.io/images/favicon.png?v=10" />
+   <title>Roamer.io</title>
    <meta name="viewport"
       content="width=device-width, height=device-height, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no, viewport-fit=cover">
-   <meta name="description" content="Foes.io is a free multiplayer battle royale online game">
+   <meta name="description" content="Roamer.io is a free multiplayer survival game">
    <meta name="keywords" content="game,games,pubg,battleground,royale,fortnite,gaming,online,io,multiplayer,free">
    <meta http-equiv="Cache-control" content="public">
    <link rel="stylesheet" href="mainstyle.css" />
@@ -33,10 +32,19 @@
    </div>
    <!-- SETTINGS CONTAINER -->
    <div id="settingsContainer">
-      <div class="settingsIcon" onclick="showLeaderboard()">
+      <div class="settingsIcon" onclick="showPanel('shop')" title="Shop (B)">
+         <i class="material-icons" style="color:#fff;font-size:45px">shopping_cart</i>
+      </div>
+      <div class="settingsIcon" onclick="showPanel('clan')" title="Clan (C)">
+         <i class="material-icons" style="color:#fff;font-size:45px">groups</i>
+      </div>
+      <div class="settingsIcon" onclick="showPanel('arena')" title="Arena (V)">
+         <i class="material-icons" style="color:#fff;font-size:45px">sports_kabaddi</i>
+      </div>
+      <div class="settingsIcon" onclick="showLeaderboard()" title="Leaderboard">
          <i class="material-icons" style="color:#fff;font-size:45px">&#xE24B;</i>
       </div>
-      <div class="settingsIcon" onclick="window.showInfoScreen(4)">
+      <div class="settingsIcon" onclick="window.showInfoScreen(4)" title="Settings">
          <i class="material-icons" style="color:#fff;font-size:45px">&#xE8B8;</i>
       </div>
       <div id="soundSetting" style="display: inline-block" onclick="toggleSound();"></div>
@@ -46,21 +54,10 @@
       <div id="topMenuContainer">
       </div>
       <canvas id="minimap"></canvas>
-      <div id="borderTimer">00:00</div>
    </div>
 
    <!-- SPECTATE UI -->
    <div id="spectateContainer">
-      <div id="matchOverContainer">
-         <div id="inGameAd">
-            <div align="center" id="foesio_728x90_1">
-               <script data-cfasync="false" type="text/javascript">
-                  // freestar.queue.push(function () { googletag.display('foesio_728x90_1'); });
-               </script>
-            </div>
-         </div>
-         <div id="matchOverText">wait until next round</div>
-      </div>
       <div id="deathMessage"></div>
       <div id="gameOverMessage"></div>
       <div id="roundInfo">
@@ -68,24 +65,14 @@
          <div id="tokenCount"></div>
       </div>
       <div id="endButtonHolder">
-         <div id="playAgainButton" class="endButton" onclick="enterGame(true)" style="margin-right:20px">Play Again
-         </div>
-         <div class="endButton" onclick="toggleMenu(true)">Exit to Lobby</div>
-      </div>
-      <div id="spectateText">
-         <div style="color:rgba(255,255,255,0.3);font-size:30px;margin-bottom:15px;">
-            [Mouse1] Next
-         </div>
-         <div style="color:#fff;font-size:52px">Spectating</div>
+         <div id="playAgainButton" class="endButton" style="margin-right:20px">Play Again</div>
+         <div id="exitButton" class="endButton">Exit to Lobby</div>
       </div>
    </div>
    
    <!-- GAME UI -->
    <div id="uiContainer">
-      <div id="voiceDisplay">
-         <i class="material-icons" style="color:#fff;font-size:40px;">&#xE029;</i>
-      </div>
-      <div id="ammoDisplay" onclick="dropWeapon()">Ammo</div>
+      <div id="ammoDisplay">Ammo</div>
       <div id="infoDisplay"></div>
       <div id="killTextCont">
          <div id="killText"></div>
@@ -99,15 +86,9 @@
    
    <!-- MAIN MENU -->
    <div id="mainMenuContainer" style="display:none">
-      <div id="gameName">game name</div>
+      <div id="gameName">Roamer.io</div>
       <div class="mainMenuSub" id="adParent">
-         <div class="menuCard" id="adCard">
-            <div align="center" id="foesio_300x250_1">
-               <script data-cfasync="false" type="text/javascript">
-                  // freestar.queue.push(function () { googletag.display('foesio_300x250_1'); });
-               </script>
-            </div>
-         </div>
+         <div class="menuCard" id="adCard" style="text-align:left"></div>
       </div>
       <div class="mainMenuSub" id="buttonCardParent">
          <div class="menuCard" id="buttonCard">
@@ -127,16 +108,12 @@
       </div>
       <div class="mainMenuSub" id="infoCardParent">
          <div class="menuCard" id="infoCard" style="text-align:left;max-height:250px;overflow-y:scroll"></div>
-         <div id="downloadButtonContainer" class="menuCard">
-            <a class="downloadBadge"
-               href="https://web.archive.org/web/20190120075244/https://itunes.apple.com/us/app/foes-io/id1326084378?ls=1&amp;mt=8"
-               target="_blank"><img src="/web/20190120075244im_/https://foes.io/images/badges/ios.svg"></a></img>
-            <a class="downloadBadge"
-               href="https://web.archive.org/web/20190120075244/https://play.google.com/store/apps/details?id=com.yendis.foes"
-               target="_blank"><img src="/web/20190120075244im_/https://foes.io/images/badges/android.png"></img></a>
-         </div>
       </div>
    </div>
+   <!-- IN-GAME PANEL (shop, clan, arena, chest) -->
+   <div id="gamePanel" class="menuCard"></div>
+   <!-- CHEST (shown next to your chest) -->
+   <div id="chestCard" class="menuCard"></div>
    <!-- HOVER INFO -->
    <div id="hoverDisplay"></div>
 </body>

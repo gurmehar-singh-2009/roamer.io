@@ -1,758 +1,772 @@
-import init, {
-  encode_into_bytes,
-  HandshakeState,
-  solve_pow,
-} from "../parser/pkg/parser";
-import { Render } from "./render/renderer";
-import utils from "./utils";
+import { encode_into_bytes, HandshakeState, solve_pow } from "../parser/pkg/parser";
+import { Render, PLAYER_TEXTURES } from "./render/renderer";
 import Player from "./objects/player";
-import { decodePacket, initDecoder } from "./packetHandler";
-import { ActionBar } from "./ui/actionBar";
-import { WEAPONS } from "./data/weapons";
-import { HitLeaf } from "./objects/leaf";
-import GameObject from "./objects/object";
-
-// Import assets
-import LeafParticle from "./assets/particle_0.png";
-import PlayerSprite from "./assets/head.png";
-import Arm1Sprite from "./assets/arm_1.png";
-import Arm2Sprite from "./assets/arm_2.png";
 import Animal from "./objects/animal";
-import WolfSprite from "./assets/wolf.png";
-import FishSprite from "./assets/fish_1.png";
-import { UpgradeBar } from "./ui/upgradeBar";
-import HammerSprite from "./assets/weapons/hammer_1.png";
-import BackPackSprite from "./assets/pack_0.png";
+import GameObject from "./objects/object";
+import { decodePacket, initDecoder } from "./packetHandler";
+import { HUD } from "./ui/hud";
+import { Dom } from "./ui/dom";
+import { C, S } from "./protocol";
+import { ITEMS } from "./data/items";
+import { WEAPONS } from "./data/weapons";
+import { loadTexturePack } from "./texturePack";
+import { isEntrance } from "./render/caves";
 
 /**
- * Game class.
+ * Where the server is. In development these come from the defaults (or
+ * VITE_GAME_PORT / VITE_POW_PORT); a release build is told by the
+ * /config.json file the client host serves (see release/roamer.sh):
+ * { "gamePort", "powPort", "powPath"?, "host"?, "certHashes"? }. With
+ * `powPath` the challenge comes from the page's own origin (the client host
+ * passes it on to the game server).
  */
+const SERVER = {
+  host: "127.0.0.1",
+  gamePort: Number(import.meta.env?.VITE_GAME_PORT ?? 6767),
+  powPort: Number(import.meta.env?.VITE_POW_PORT ?? 3001),
+  powPath: null,
+  // SHA-256 hashes (base64) of a self-signed certificate to accept.
+  certHashes: [],
+};
+
+/** Reads /config.json if the page was served with one. */
+async function loadServerConfig() {
+  try {
+    const res = await fetch("/config.json", { cache: "no-store" });
+    if (!res.ok) return;
+    const c = await res.json();
+    SERVER.host = c.host || location.hostname;
+    SERVER.gamePort = c.gamePort ?? SERVER.gamePort;
+    SERVER.powPort = c.powPort ?? SERVER.powPort;
+    SERVER.powPath = c.powPath ?? null;
+    SERVER.certHashes = c.certHashes ?? [];
+  } catch {
+    // No config: development defaults.
+  }
+}
+
+/** A host name for a URL (IPv6 addresses go in brackets). */
+const urlHost = (h) => (h.includes(":") && !h.startsWith("[") ? `[${h}]` : h);
+
+/** Messages that must arrive go on the reliable stream; the rest are
+ * datagrams. */
+const DATAGRAM_OPCODES = new Set([C.MOVE, C.AIM]);
+
+/** Reads [length: u32 BE][payload] frames from a stream. */
+async function* readFrames(stream) {
+  const reader = stream.getReader();
+  let buf = new Uint8Array(0);
+  const need = async (n) => {
+    while (buf.length < n) {
+      const { value, done } = await reader.read();
+      if (done) return false;
+      const merged = new Uint8Array(buf.length + value.length);
+      merged.set(buf);
+      merged.set(value, buf.length);
+      buf = merged;
+    }
+    return true;
+  };
+  while (await need(4)) {
+    const len = new DataView(buf.buffer, buf.byteOffset, 4).getUint32(0, false);
+    if (!(await need(4 + len))) return;
+    yield buf.slice(4, 4 + len);
+    buf = buf.slice(4 + len);
+  }
+}
+
 export class Game {
   constructor() {
     this.renderer = new Render(this);
+    this.hud = null;
+    this.dom = new Dom(this);
 
-    this.players = [];
-    this.animals = [];
-    this.objects = [];
-    this.inventory = [];
-    this.leaves = [];
+    this.players = new Map();
+    this.animals = new Map();
+    this.objects = new Map();
+    this.me = null;
+    this.myId = null;
+    this.connected = false;
 
-    this.actionBar = null;
-    this.resourceDisplay = null; //new ResourceDisplay();
-    this.upgradeBar = new UpgradeBar(this);
-
-    this.my_player = null;
+    this.loadout = null;
+    this.resources = { wood: 0, stone: 0, food: 0, gold: 0, ammo: 0 };
+    this.shop = null;
+    this.clanState = null;
+    this.clanNames = new Map();
+    this.arenaState = null;
+    this.account = null;
+    this.lastCoins = 0;
+    this.selectedItem = null;
+    this.leaderIcons = { crown: null, skull: null, star: null };
 
     this.moveInput = { up: false, down: false, left: false, right: false };
     this.lastMoveDir = null;
-    this.zoomDelta = 0;
-
     this.lastAimDir = 0;
-
-    this.chatBoxVisible = false;
-
-    this.utils = { game: this };
-    utils.bind(this.utils)();
+    this._lastAimSend = 0;
+    this.cameraMouseMode = false;
+    this._mouseX = window.innerWidth / 2;
+    this._mouseY = window.innerHeight / 2;
   }
 
-  /**
-   * Initializes the game.
-   */
+  /** The local player (older UI code calls it this). */
+  get my_player() {
+    return this.me;
+  }
+
+  get inArena() {
+    return !!(this.me && this.me.x > 16384);
+  }
+
   async init() {
-    // Initialize WASM.
+    this.dom.showLoading("Loading...");
+    await loadTexturePack();
     await initDecoder();
-
-    // Initialize renderer.
     await this.renderer.init();
+    this.hud = new HUD(this);
 
-    // Add event listener to the Enter Game button.
-    document.getElementById("goButton").addEventListener("click", async () => {
-      await this.enterGame();
-    });
-
-    // Get the challenge from the server and solve it to get the nonce.
-    const challenge = await fetch(`http://127.0.0.1:3001/challenge`).then((r) =>
-      r.text(),
-    );
-    // Solve the POW to get the nonce.
-    const nonce = solve_pow(challenge, 4);
-
-    // Create the WebTransport connection with the solved nonce and challenge.
-    this.wt = new WebTransport(
-      `https://127.0.0.1:6767/?pow=${nonce}&challenge=${challenge}`,
-    );
-
-    // Wait for the WebTransport connection to be ready.
-    await this.wt.ready;
-    // console.log("wt connected");
-
-    // Initialize the datagram writer and reader.
-    this.datagramWriter = this.wt.datagrams.writable.getWriter();
-    this.datagramReader = this.wt.datagrams.readable.getReader();
-
-    // console.log("starting handshake");
-
-    // Send the ClientHello message over the datagram stream.
-    const handshakeAndMsg = HandshakeState.create_client_hello();
-    const clientHelloBytes = handshakeAndMsg.message();
-
-    // Frame the ClientHello message with a 4-byte length prefix.
-    const helloFramed = new ArrayBuffer(4 + clientHelloBytes.byteLength);
-    new DataView(helloFramed).setUint32(0, clientHelloBytes.byteLength, false);
-    new Uint8Array(helloFramed, 4).set(clientHelloBytes);
-
-    // Create a bidirectional stream (reliable).
-    const stream = await this.wt.createBidirectionalStream();
-
-    // Initialize the stream writer and reader.
-    this.streamWriter = stream.writable.getWriter();
-    this.streamReader = stream.readable.getReader();
-
-    // Send the ClientHello message over the stream.
-    await this.streamWriter.write(new Uint8Array(helloFramed));
-    // console.log("sent ClientHello");
-
-    // Allocate a buffer to read the handshake response.
-    let handshakeBuffer = new Uint8Array(0);
-
-    // Read the handshake response from the stream.
-    const readExact = async (n) => {
-      while (handshakeBuffer.length < n) {
-        const { value, done } = await this.streamReader.read();
-        if (done) throw new Error("connection closed during handshake");
-        const merged = new Uint8Array(handshakeBuffer.length + value.length);
-        merged.set(handshakeBuffer);
-        merged.set(value, handshakeBuffer.length);
-        handshakeBuffer = merged;
-      }
-    };
-
-    // Read the server's hello message length and data.
-    await readExact(4);
-    const serverHelloLen = new DataView(handshakeBuffer.buffer).getUint32(
-      0,
-      false,
-    );
-    // Read the server's hello message data.
-    await readExact(4 + serverHelloLen);
-
-    // Complete the handshake and initialize crypto.
-    this.crypto = handshakeAndMsg.complete_handshake(
-      handshakeBuffer.slice(4, 4 + serverHelloLen),
-    );
-
-    // console.log("handshake complete");
-    // console.log(`send nonce: ${this.crypto.get_send_nonce()}`);
-    // console.log(`receive nonce: ${this.crypto.get_recv_nonce()}`);
-
-    // Wait for the handshake to complete before closing the stream.
-    this.streamWriter.close().catch(() => {});
-    this.streamReader.cancel().catch(() => {});
-
-    // Add event listeners for user input.
     window.addEventListener("keydown", this.handleKey);
     window.addEventListener("keyup", this.handleKey);
     window.addEventListener("mousemove", this.handleMouseMove);
-    window.addEventListener("mousedown", this.handleMousedown);
-    window.addEventListener("mouseup", this.handleMousedown);
-
-    // Start the read loops to receive packets from the server.
-    this.read().catch((e) => console.error("read loop died:", e));
-
-    // Start the reliable read loop to receive reliable streams from the server.
-    this.readReliable().catch((e) =>
-      console.error("reliable read loop died:", e),
-    );
-  }
-
-  /**
-   * Reads messages from the reliable stream. (TCP).
-   */
-  async readReliable() {
-    // Read reliable streams from the server.
-    const reader = this.wt.incomingUnidirectionalStreams.getReader();
-
-    while (true) {
-      // Wait for the next stream to be available.
-      const { value: stream, done } = await reader.read();
-
-      // If the stream is done, break the loop.
-      if (done) break;
-
-      // Handle the stream.
-      this.handleReliableStream(stream).catch((e) =>
-        console.error("reliable stream error:", e),
-      );
-    }
-  }
-
-  /**
-   * Handles the reliable stream to the server.
-   * @param {*} stream The reliable stream to handle.
-   */
-  async handleReliableStream(stream) {
-    // Read the stream.
-    const reader = stream.getReader();
-    // Accumulate the stream data.
-    let carry = new Uint8Array(0);
-
-    // Read the stream data into the carry buffer.
-    const readExact = async (n) => {
-      const out = new Uint8Array(n);
-      let offset = 0;
-
-      // drain carry first
-      if (carry.length > 0) {
-        const take = Math.min(carry.length, n);
-        out.set(carry.subarray(0, take), 0);
-        carry = carry.subarray(take);
-        offset += take;
-      }
-
-      while (offset < n) {
-        const { value, done } = await reader.read();
-        if (done) throw new Error("stream closed early");
-        const need = n - offset;
-        if (value.length <= need) {
-          out.set(value, offset);
-          offset += value.length;
-        } else {
-          out.set(value.subarray(0, need), offset);
-          carry = value.subarray(need); // save the overshoot
-          offset = n;
-        }
-      }
-      return out;
-    };
-
-    // Read the payload length from the stream.
-    const lenBuf = await readExact(4);
-    const payloadLen = new DataView(lenBuf.buffer).getUint32(0, false);
-    // Read the payload from the stream.
-    const payload = await readExact(payloadLen);
+    window.addEventListener("mousedown", this.handleMouse);
+    window.addEventListener("mouseup", this.handleMouse);
+    window.addEventListener("blur", () => this.releaseInput());
 
     try {
-      // Decrypt and decode the payload.
-      const plaintext = this.crypto.decrypt(payload);
-      const opcode = plaintext[0];
-      if (opcode === 2 || opcode === 12) {
-        const id = new DataView(
-          plaintext.buffer,
-          plaintext.byteOffset + 1,
-          4,
-        ).getUint32(0, true);
-        const pkt = { code: opcode, data: { id } };
-        this.handlePacket(pkt);
-      } else {
-        const packet = decodePacket(plaintext);
-        this.handlePacket(packet);
-      }
-
-      // Handle the decoded packet.
+      this.dom.showLoading("Connecting...");
+      await this.connect();
+      this.dom.showMainMenu();
+      this.renderer.app.ticker.add(() => {
+        this.dom.update();
+        this.frameChecks();
+      });
     } catch (e) {
-      console.error("reliable decrypt/decode error:", e);
+      console.error(e);
+      this.dom.showLoading("Couldn't connect to the server. Is it running?");
     }
   }
 
-  /**
-   * Handle the chat box.
-   */
-  async handleChatBox() {
-    // Get the chatbox element.
-    const chatbox = document.getElementById("chatbox");
+  // ------------------------------------------------------------ network --
 
-    // Toggle the chat box visibility.
-    this.chatBoxVisible = !this.chatBoxVisible;
+  async connect() {
+    await loadServerConfig();
+    const host = urlHost(SERVER.host);
+    const challengeUrl = SERVER.powPath
+      ? new URL(SERVER.powPath, location.href).href
+      : `http://${host}:${SERVER.powPort}/challenge`;
+    const challenge = await fetch(challengeUrl, { cache: "no-store" }).then((r) => r.text());
+    const nonce = solve_pow(challenge, 4);
+    // A self-signed certificate is accepted by its hash (it must be ECDSA and
+    // valid for under two weeks; release/roamer.sh makes and renews it).
+    const options = SERVER.certHashes.length
+      ? {
+          serverCertificateHashes: SERVER.certHashes.map((h) => ({
+            algorithm: "sha-256",
+            value: Uint8Array.from(atob(h), (ch) => ch.charCodeAt(0)),
+          })),
+        }
+      : {};
+    this.wt = new WebTransport(`https://${host}:${SERVER.gamePort}/?pow=${nonce}&challenge=${challenge}`, options);
+    await this.wt.ready;
+    this.wt.closed
+      .catch(() => {})
+      .finally(() => {
+        this.connected = false;
+        this.dom.showLoading("Disconnected. Refresh to play again.");
+      });
 
-    // If the chat box is visible, display it and focus on the input.
-    if (this.chatBoxVisible) {
-      chatbox.style.display = "block";
-      chatbox.focus();
+    this.datagramWriter = this.wt.datagrams.writable.getWriter();
+    this.datagramReader = this.wt.datagrams.readable.getReader();
+
+    // Handshake on a bidirectional stream.
+    const handshake = HandshakeState.create_client_hello();
+    const hello = handshake.message();
+    const framed = new Uint8Array(4 + hello.byteLength);
+    new DataView(framed.buffer).setUint32(0, hello.byteLength, false);
+    framed.set(hello, 4);
+    const stream = await this.wt.createBidirectionalStream();
+    const writer = stream.writable.getWriter();
+    await writer.write(framed);
+    const frames = readFrames(stream.readable);
+    const { value: serverHello } = await frames.next();
+    if (!serverHello) throw new Error("connection closed during handshake");
+    this.crypto = handshake.complete_handshake(serverHello);
+    writer.close().catch(() => {});
+
+    // Our reliable stream to the server.
+    const uni = await this.wt.createUnidirectionalStream();
+    this.reliableWriter = uni.getWriter();
+    this.connected = true;
+
+    this.readDatagrams().catch((e) => console.error("datagram loop died:", e));
+    this.readReliable().catch((e) => console.error("reliable loop died:", e));
+  }
+
+  /** Encodes, encrypts and sends a message. */
+  async send(opcode, data) {
+    if (!this.connected) return;
+    const packet = this.crypto.encrypt(encode_into_bytes(data, opcode));
+    if (DATAGRAM_OPCODES.has(opcode)) {
+      await this.datagramWriter.write(packet).catch(() => {});
       return;
     }
-
-    // If the chat box is not visible, clear the input and hide the chat box.
-    const message = chatbox.value.trim();
-
-    // If the message is not empty, send it and clear the input.
-    if (message.length > 0) {
-      await this.sendEncrypted({ message }, 12);
-    }
-
-    // Clear the input and hide the chat box.
-    chatbox.value = "";
-    chatbox.style.display = "none";
-    chatbox.blur();
+    const framed = new Uint8Array(4 + packet.length);
+    new DataView(framed.buffer).setUint32(0, packet.length, false);
+    framed.set(packet, 4);
+    await this.reliableWriter.write(framed).catch(() => {});
   }
 
-  /**
-   * Handle key events.
-   * @param {*} e KeyEvent.
-   * @returns
-   */
+  // Kept for the chat widget.
+  sendEncrypted(data, opcode) {
+    return this.send(opcode, data);
+  }
+
+  async readDatagrams() {
+    while (true) {
+      const { value, done } = await this.datagramReader.read();
+      if (done) return;
+      this.receive(value);
+    }
+  }
+
+  async readReliable() {
+    const streams = this.wt.incomingUnidirectionalStreams.getReader();
+    while (true) {
+      const { value: stream, done } = await streams.read();
+      if (done) return;
+      (async () => {
+        for await (const frame of readFrames(stream)) this.receive(frame);
+      })().catch((e) => console.error("reliable stream error:", e));
+    }
+  }
+
+  receive(bytes) {
+    if (!bytes || bytes.length < 9) return;
+    try {
+      this.handlePacket(decodePacket(this.crypto.decrypt(bytes)));
+    } catch (e) {
+      console.error("decode error:", e);
+    }
+  }
+
+  // -------------------------------------------------------------- input --
+
+  canAim() {
+    return !this.hud?.chat?.isOpen;
+  }
+
+  releaseInput() {
+    this.moveInput = { up: false, down: false, left: false, right: false };
+    this.sendInput();
+    if (this.attacking) {
+      this.attacking = false;
+      this.send(C.ATTACK, { attacking: false });
+    }
+  }
+
   handleKey = (e) => {
     const down = e.type === "keydown";
     const key = e.key.toLowerCase();
 
-    // Handle enter key to send chat messages.
+    if (this.hud?.chat?.isOpen) {
+      if (down) this.hud.chat.key(e);
+      return;
+    }
+    if (this.dom.deathVisible) {
+      if (down && key === "enter") this.dom.playAgain();
+      return;
+    }
+    // Typing in a DOM input (name, clan name...).
+    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
+    if (!this.me) return;
+
+    if (down && key === "escape") {
+      if (this.dom.panelOpen) this.dom.closePanel();
+      else this.selectItem(null);
+      return;
+    }
     if (key === "enter" && down) {
       e.preventDefault();
-
-      (async () => {
-        await this.handleChatBox();
-      })();
-
+      this.hud?.chat.open();
       return;
     }
 
-    // Ignore movement while typing.
-    if (this.chatBoxVisible) return;
-
-    // Handle movement keys.
     switch (key) {
       case "w":
       case "arrowup":
         this.moveInput.up = down;
         break;
-
       case "s":
       case "arrowdown":
         this.moveInput.down = down;
         break;
-
       case "a":
       case "arrowleft":
         this.moveInput.left = down;
         break;
-
       case "d":
       case "arrowright":
         this.moveInput.right = down;
         break;
+      default:
+        if (down && !e.repeat) this.handleShortcut(key);
     }
-    // Send the input to the server.
     this.sendInput();
   };
 
-  /**
-   * Handle mouse down event.
-   */
-  handleMousedown = async (_) => {
-    await this.sendEncrypted({}, 6);
-  };
-
-  /**
-   * Handle mouse move event.
-   * @param {*} e MouseEvent.
-   */
-  // TODO: Calculate aim based on player position and mouse position relative to the world.
-  handleMouseMove = (e) => {
-    // Calculate the center of the screen.
-    const cx = window.innerWidth / 2;
-    const cy = window.innerHeight / 2;
-
-    // Calculate the aim direction based on mouse position relative to the center.
-    const aim = Math.atan2(e.clientY - cy, e.clientX - cx);
-
-    // Send the aim direction to the server if it has changed.
-    if (this.lastAimDir === aim) return;
-    this.lastAimDir = aim;
-
-    // aim is sent piggy-backed on every position update from the server (case 3),
-    // but also send immediately for responsiveness.
-    this.sendAim(aim).catch(() => {});
-  };
-
-  /**
-   *
-   * @returns
-   */
-  sendInput = () => {
-    // Early return if not connected or no player.
-    if (!this.my_player) return;
-
-    // Calculate the move direction based on input.
-    let dir = null;
-    if (
-      this.moveInput.up ||
-      this.moveInput.down ||
-      this.moveInput.left ||
-      this.moveInput.right
-    ) {
-      const dx = (this.moveInput.right ? 1 : 0) - (this.moveInput.left ? 1 : 0);
-      const dy = (this.moveInput.down ? 1 : 0) - (this.moveInput.up ? 1 : 0);
-      dir = Math.atan2(dy, dx);
+  handleShortcut(key) {
+    if (/^[1-9]$/.test(key)) return this.selectSlot(Number(key) - 1);
+    const groupItem = (ids) => this.loadout?.items.find((i) => ids.includes(i));
+    switch (key) {
+      case "q":
+        return this.eat();
+      case "e":
+        return this.useItem(groupItem([3, 4, 5]));
+      case "f":
+        return this.useItem(groupItem([6, 7, 8, 9]));
+      case "b":
+        return this.dom.togglePanel("shop");
+      case "c":
+        return this.dom.togglePanel("clan");
+      case "x":
+        return this.send(C.CAVE, {});
+      case "v":
+        return this.dom.togglePanel("arena");
+      case "\\":
+        this.cameraMouseMode = !this.cameraMouseMode;
+        return this.hud?.toast(`camera: ${this.cameraMouseMode ? "mouse follow" : "centered"}`);
     }
+  }
 
+  /** Picks hotbar slot `i` (weapons first, then items). */
+  selectSlot(i) {
+    const entry = this.hud?.actionBar.entries()[i];
+    if (!entry) return;
+    if (entry.weapon != null) {
+      this.selectItem(null);
+      this.send(C.CHOOSE_WEAPON, { weapon: entry.weapon });
+    } else {
+      // Food and buildings go in your hand; click to eat or place.
+      this.selectItem(this.selectedItem === entry.item ? null : entry.item);
+    }
+  }
+
+  selectItem(item) {
+    this.selectedItem = item ?? null;
+    const texture = item == null ? null : this.renderer.textures[ITEMS[item]?.texture];
+    this.me?.setHeldItem(texture || null, item == null ? null : ITEMS[item], this.renderer.overlayFilter);
+  }
+
+  /** Q: takes your food in hand (click to eat), or puts it away. */
+  eat() {
+    const food = this.loadout?.items.find((i) => ITEMS[i]?.food);
+    if (food != null) this.selectItem(this.selectedItem === food ? null : food);
+  }
+
+  useItem(item) {
+    if (item == null) return;
+    this.send(C.USE_ITEM, { item });
+  }
+
+  chooseUpgrade(isItem, id) {
+    this.send(C.CHOOSE_UPGRADE, { is_item: isItem, id });
+  }
+
+  handleMouse = (e) => {
+    if (!this.me || this.hud?.chat?.isOpen) return;
+    const down = e.type === "mousedown";
+    if (down) {
+      if (this.hud?.pointerOverUI || e.target !== this.renderer.app.canvas) return;
+      if (this.selectedItem != null) {
+        // Place the selected item. We go back to the weapon (like moomoo)
+        // once the server says it was placed; if it couldn't be, the item
+        // stays selected.
+        this.useItem(this.selectedItem);
+        this.pendingPlace = { item: this.selectedItem, at: performance.now() };
+        return;
+      }
+      this.attacking = true;
+      this.send(C.ATTACK, { attacking: true });
+    } else if (this.attacking) {
+      this.attacking = false;
+      this.send(C.ATTACK, { attacking: false });
+    }
+  };
+
+  handleMouseMove = (e) => {
+    this._mouseX = e.clientX;
+    this._mouseY = e.clientY;
+    if (!this.canAim()) return;
+    const aim = this._computeAim();
+    if (aim === null || this.lastAimDir === aim) return;
+    this.lastAimDir = aim;
+    const now = performance.now();
+    if (now - this._lastAimSend < 30) return;
+    this._lastAimSend = now;
+    this.send(C.AIM, { dir: aim });
+  };
+
+  /** Aim from the cursor relative to the player's on-screen position. */
+  _computeAim = () => {
+    const p = this.me;
+    if (!p) return null;
+    const r = this.renderer;
+    const sx = r.app.screen.width / 2 + (p._rx - r.camera.x) * r.zoom;
+    const sy = r.app.screen.height / 2 + (p._ry - r.camera.y) * r.zoom;
+    return Math.atan2(this._mouseY - sy, this._mouseX - sx);
+  };
+
+  sendInput = () => {
+    if (!this.me) return;
+    let dir = null;
+    const m = this.moveInput;
+    if (m.up || m.down || m.left || m.right) {
+      dir = Math.atan2((m.down ? 1 : 0) - (m.up ? 1 : 0), (m.right ? 1 : 0) - (m.left ? 1 : 0));
+      if ((m.up && m.down && !m.left && !m.right) || (m.left && m.right && !m.up && !m.down)) dir = null;
+    }
     if (this.lastMoveDir === dir) return;
     this.lastMoveDir = dir;
-
-    // Send the move direction to the server.
-    this.sendMove(dir).catch(() => {});
+    this.sendMove(dir);
   };
 
-  async enterGame() {
-    const spawnData = { name: document.getElementById("nameInput").value };
-    await this.sendEncrypted(spawnData, 1);
-    console.log("spawn msg sent");
-    document.getElementById("mainMenuContainer").remove();
-    document.getElementById("darkener").remove();
+  // Kept for the chat widget.
+  sendMove(dir) {
+    return this.send(C.MOVE, { dir });
   }
 
-  async sendEncrypted(data, opcode) {
-    if (!this.crypto || !this.datagramWriter) {
-      throw new Error("cannot send - encryption not initialised");
+  // ----------------------------------------------------------- lifecycle --
+
+  spawn(name) {
+    this.send(C.SPAWN, { name, token: localStorage.getItem("roamer-token") || "" });
+  }
+
+  /** Our player died: show the death screen; the world stays loaded. */
+  onDeath(data) {
+    this.releaseInput();
+    this.selectItem(null);
+    if (this.me) {
+      this.dom.deathAt = { x: this.me.x, y: this.me.y };
+      this.removePlayer(this.myId);
     }
-    const plaintext = encode_into_bytes(data, opcode);
-    // crypto.encrypt() → Uint8Array of [ nonce(8) | ciphertext ]
-    const packet = this.crypto.encrypt(plaintext);
-    await this.datagramWriter.write(packet);
+    this.me = null;
+    this.hud.upgradeBar.setOptions({ age: 0, weapons: [], items: [], pending: 0 });
+    this.dom.showDeath(data);
   }
 
-  async read() {
-    while (true) {
-      const { value, done } = await this.datagramReader.read();
-      if (done) break;
-      if (!value || value.length < 9) continue; // 8 nonce + >=1 ciphertext byte
+  removePlayer(id) {
+    const p = this.players.get(id);
+    if (!p) return;
+    // Players we can see fall apart; others just go.
+    if (p._shown !== false && p.root?.renderable !== false && !p.root?.destroyed) {
+      p.destroyLabels();
+      p.centerRoot();
+      this.renderer.fx.breakApart(p.root, p._rx, p._ry, 35, ["dust"]);
+    } else {
+      p.destroy();
+    }
+    this.players.delete(id);
+    if (id === this.myId && this.me === p) this.me = null;
+  }
 
-      try {
-        const plaintext = this.crypto.decrypt(value);
-        const opcode = plaintext[0];
-        if (opcode === 2 || opcode === 12) {
-          const id = new DataView(
-            plaintext.buffer,
-            plaintext.byteOffset + 1,
-            4,
-          ).getUint32(0, true);
-          const pkt = { code: opcode, data: { id } };
-          this.handlePacket(pkt);
-        } else {
-          const packet = decodePacket(plaintext);
-          this.handlePacket(packet);
-        }
-      } catch (e) {
-        console.error("decrypt/decode error:", e);
+  // ------------------------------------------------------------ packets --
+
+  handlePacket({ code, data }) {
+    switch (code) {
+      case S.SPAWNED: {
+        this.myId = data.id;
+        localStorage.setItem("roamer-token", data.token);
+        this.account = data;
+        localStorage.setItem("roamer-account", JSON.stringify(data));
+        this.lastCoins = data.coins_earned;
+        this.dom.refresh("account");
+        break;
       }
-    }
-    console.warn("datagram reader closed");
-  }
-
-  handlePacket(packet) {
-    switch (packet.code) {
-      case 1: {
-        console.log("player spawned:", packet.data);
-        const { is_mine, data } = packet.data;
-        const player = new Player(
-          data,
-          [
-            this.renderer.textures[PlayerSprite],
-            this.renderer.textures[Arm1Sprite],
-            this.renderer.textures[Arm2Sprite],
-            this.renderer.textures[BackPackSprite],
-          ],
+      case S.ADD_PLAYER: {
+        this.removePlayer(data.data.id);
+        const pd = data.data;
+        const t = this.renderer.textures;
+        const p = new Player(
+          { id: pd.id, name: data.name, x: pd.x, y: pd.y, weapon: -1, aim: pd.aim, health: pd.health },
+          PLAYER_TEXTURES.map((path) => t[path]),
           this.renderer.world,
-          this.utils,
+          { game: this },
         );
-
-        player.setWeaponTexture(
-          data.weapon === 1 ? this.renderer.textures[HammerSprite] : null,
-        );
-
-        this.players.push(player);
-
-        if (is_mine) {
-          this.my_player = player;
-          this.actionBar = new ActionBar();
+        p.weapon = -1;
+        p.variant = -1;
+        p.hat = p.accessory = p.skin = -1;
+        this.players.set(p.id, p);
+        if (data.is_mine) {
+          p.isLocal = true;
+          this.me = p;
+          this.myId = p.id;
+          this.dom.deathAt = null;
+          this.dom.showGame();
+          this.hud.resources.show();
         }
-
+        this.applyPlayer(p, pd);
+        // Spawning (or joining) near us: pop in.
+        if (data.is_mine || (this.me && Math.hypot(pd.x - this.me.x, pd.y - this.me.y) < 900)) {
+          p.centerRoot();
+          this.renderer.fx.popIn(p.root);
+        }
+        p.icons = this.iconsFor(p.id);
+        p.refreshName();
         break;
       }
-
-      case 3: {
-        const { players } = packet.data;
-        for (const p of players) {
-          const player = this.utils.findPlayerByID(p.id);
-          if (!player) continue;
-
-          // console.error(p.weapon, player.weapon);
-
-          // if (player.weapon !== p.weapon.id) {
-          //   player.setWeaponTexture(
-          //     p.weapon.id === 1 ? this.renderer.textures[HammerSprite] : null
-          //   );
-          // }
-
-          player.x = p.x;
-          player.y = p.y;
-          player.lastAim = p.aim;
-          player.aim = p.aim;
-          player.sprite.x = p.x;
-          player.sprite.y = p.y;
-        }
-
-        this.sendAim(this.lastAimDir).catch(() => {});
+      case S.REMOVE_PLAYER:
+        if (data.id !== this.myId) this.removePlayer(data.id);
         break;
-      }
-
-      case 4: {
+      case S.UPDATE_PLAYERS:
+        for (const pd of data.players) {
+          const p = this.players.get(pd.id);
+          if (p) this.applyPlayer(p, pd);
+        }
+        this.send(C.AIM, { dir: this.lastAimDir });
+        break;
+      case S.ANIMALS: {
         const now = performance.now();
-
-        // console.log(packet.data.animals);
-
-        for (const a of this.animals) {
-          a.sprite.visible = false;
-        }
-
-        for (const animalData of packet.data.animals) {
-          let existing = this.utils.findAnimalByID(animalData.id);
-
-          if (!existing) {
-            let texture =
-              animalData.animal_type === 1
-                ? this.renderer.textures[FishSprite]
-                : this.renderer.textures[WolfSprite];
-
-            const newAnimal = new Animal(
-              animalData,
-              this.renderer.world,
-              texture,
+        for (const ad of data.animals) {
+          const existing = this.animals.get(ad.id);
+          if (existing && existing.kind === ad.kind) {
+            if (ad.health < existing.health - 0.001) {
+              this.renderer.fx.hitCreature(existing.sprite._rx, existing.sprite._ry);
+            }
+            existing.apply(ad);
+          }
+          else {
+            existing?.destroy();
+            this.animals.set(
+              ad.id,
+              new Animal(ad, this.renderer.world, this.renderer.textures, this.renderer.animalLayer),
             );
-            newAnimal.sprite.visible = true;
-
-            this.animals.push(newAnimal);
-          } else {
-            existing.x = animalData.x;
-            existing.y = animalData.y;
-            existing.lastUpdate = now;
-            existing.sprite.visible = true;
           }
         }
-
-        for (let i = this.animals.length - 1; i >= 0; i--) {
-          if (now - this.animals[i].lastUpdate > 3000) {
-            this.animals[i].destroy();
-            this.animals.splice(i, 1);
+        for (const [id, a] of this.animals) {
+          const age = now - a.lastUpdate;
+          if (age > 400) a.sprite.visible = false;
+          if (age > 3000) {
+            a.destroy();
+            this.animals.delete(id);
           }
         }
         break;
       }
-
-      case 2: {
-        const id = packet.data.id;
-        const player = this.utils.findPlayerByID(id);
-        if (player) {
-          player.destroy();
-          this.players = this.players.filter((p) => p.id !== id);
-        }
-
-        if (this.my_player && this.my_player.id === id) {
-          this.cleanup();
-          // window.location.reload();
+      case S.HIT_EVENT: {
+        const p = this.players.get(data.entity_id);
+        if (p) {
+          p.attackAnim = 1;
+          p.punchTime = performance.now();
+          p.animateRightArm = !p.animateRightArm;
         }
         break;
       }
-
-      case 12: {
-        const id = packet.data.id;
-        if (this.my_player && this.my_player.id === id) {
-          console.log("You died");
-          this.cleanup();
-          // window.location.reload();
-        } else {
-          const p = this.utils.findPlayerByID(id);
-          if (p) {
-            p.destroy();
-            this.players = this.players.filter((pp) => pp.id !== id);
+      case S.ADD_OBJECT:
+        for (const od of data.objects) {
+          if (this.objects.has(od.id)) this.renderer.removeObject(od.id);
+          this.objects.set(od.id, new GameObject(od, this.myId));
+          // Our building appeared: it was placed, so put the item away.
+          const p = this.pendingPlace;
+          if (p && od.owner === this.myId && od.type_obj === 50 + p.item && performance.now() - p.at < 1500) {
+            this.pendingPlace = null;
+            if (this.selectedItem === p.item) this.selectItem(null);
           }
         }
         break;
+      case S.UPDATE_HEALTH: {
+        const p = this.players.get(data.id);
+        if (p && data.new_health < p.health - 0.5) this.renderer.fx.hitCreature(p._rx, p._ry);
+        p?.setHealth(data.new_health, data.max_health);
+        break;
       }
-
-      case 6: {
-        console.log("hit event, entity:", packet.data.entity_id);
-        const player = this.utils.findPlayerByID(packet.data.entity_id);
-        if (player) {
-          player.attackAnim = 1;
-          player.punchTime = performance.now();
-          player.animateRightArm = !player.animateRightArm;
+      case S.LOADOUT:
+        this.loadout = data;
+        if (this.selectedItem != null && !data.items.includes(this.selectedItem)) this.selectItem(null);
+        this.hud.actionBar.setLoadout(data);
+        this.updateAmmo();
+        this.dom.refresh("arena");
+        break;
+      case S.OBJECT_HIT: {
+        const o = this.objects.get(data.id);
+        if (o) {
+          o.onHit(data.dir);
+          this.renderer.hitObject(o, data.dir);
         }
         break;
       }
-
-      case 8: {
-        // Update health packet
-        const { id, new_health } = packet.data;
-        const player = this.utils.findPlayerByID(id);
-        if (player) {
-          // Server currently only sends current health; assume max = 100 on client
-          player.setHealth(new_health, 100);
+      case S.RESOURCES: {
+        // We ate the food in our hand: back to the weapon.
+        const p = this.pendingPlace;
+        if (p && ITEMS[p.item]?.food && data.food < (this.resources?.food ?? 0) && performance.now() - p.at < 1500) {
+          this.pendingPlace = null;
+          if (this.selectedItem === p.item) this.selectItem(null);
+        }
+        this.resources = data;
+        this.me?.setResources(data.wood, data.stone, data.food);
+        this.hud.resources.setValues(data.wood, data.stone, data.food, data.gold);
+        this.dom.refreshChest();
+        this.updateAmmo();
+        this.dom.refresh("shop");
+        break;
+      }
+      case S.DEATH:
+        this.onDeath(data);
+        break;
+      case S.CHAT: {
+        const p = this.players.get(data.id);
+        p?.setChatMessage(data.message);
+        this.hud.chat.push(`${p?.name || "player"}: ${data.message}`);
+        break;
+      }
+      case S.UPGRADES:
+        this.hud.upgradeBar.setOptions(data);
+        break;
+      case S.LEADERBOARD:
+        this.hud.leaderboard.setData(data);
+        this.leaderIcons = { crown: data.crown, skull: data.skull, star: data.star };
+        for (const p of this.players.values()) {
+          p.icons = this.iconsFor(p.id);
+          p.refreshName();
         }
         break;
-      }
-
-      case 7:
-        console.log("objects:", packet);
-
-        this.objects.push(...packet.data.objects.map((x) => new GameObject(x)));
+      case S.OBJECT_HEALTH:
+        this.objects.get(data.id)?.setHealth(data.health, data.max_health);
         break;
-
-      case 9:
-        this.inventory = packet.data.weapons.map(
-          (x) => WEAPONS.find((y) => y.id == x) || {},
-        );
-        if (this.actionBar) this.actionBar.update(this.inventory);
-        this.weapons = packet.data.weapons.map(
-          (x) => WEAPONS.find((y) => y.id == x) || {},
-        );
-
-        this.my_player.weapon = packet.data.weapons;
-        this.my_player.setWeaponTexture(
-          packet.data.weapons[0] === 1
-            ? this.renderer.textures[HammerSprite]
-            : null,
-        );
-
-        console.error(
-          packet.data.weapons[0] === 1
-            ? this.renderer.textures[HammerSprite]
-            : null,
-        );
-
+      case S.REMOVE_OBJECT:
+        this.renderer.removeObject(data.id);
+        this.objects.delete(data.id);
         break;
-
-      case 10: {
-        const object = this.utils.findObjectByID(packet.data.id);
-        object.onHit(packet.data.dir);
-        console.warn(packet.data);
-        this.renderer.leaves.push(
-          new HitLeaf(
-            object.x + object.scale * Math.cos(packet.data.dir),
-            object.y + object.scale * Math.sin(packet.data.dir),
-            packet.data.dir,
-            this.renderer.textures[LeafParticle],
-            this.renderer.world,
-          ),
-        );
+      case S.ADD_PROJECTILE:
+        this.renderer.addProjectile(data);
         break;
-      }
-
-      case 11: {
-        const { wood, stone, food } = packet.data;
-        // Set resources on local player if present (server sends SetResource to the player)
-        if (this.my_player) {
-          this.my_player.setResources(wood, stone, food);
+      case S.REMOVE_PROJECTILE:
+        this.renderer.removeProjectile(data.id);
+        break;
+      case S.AGE:
+        this.dom.setAge(data);
+        break;
+      case S.NOTICE:
+        this.hud.toast(data.text, data.kind);
+        break;
+      case S.EXPLOSION:
+        this.renderer.explosion(data.x, data.y, data.radius);
+        break;
+      case S.CLAN_STATE:
+        this.clanState = data;
+        this.clanNames = new Map(data.clans.map((c) => [c.id, c.name]));
+        for (const p of this.players.values()) {
+          p.clanTag = p.clan != null ? this.clanNames.get(p.clan) : null;
+          p.refreshName();
         }
-        console.log("resources updated:", wood, stone, food);
+        this.dom.refresh("clan");
         break;
-      }
-
-      case 13: {
-        game.utils
-          .findPlayerByID(packet.data.id)
-          .setChatMessage(packet.data.message);
-        // game.utils.findPlayerByID(packet.data.id).timeSinceChat = performance.now();
-        console.warn(packet.data, game.utils.findPlayerByID(packet.data.id));
+      case S.SHOP_STATE:
+        this.shop = data;
+        this.dom.refresh("shop");
         break;
-      }
-
-      case 14: {
-        console.error(packet.data);
-        this.upgradeBar.setWeapons(packet.data.upgrades.map((x) => WEAPONS[x]));
-        this.upgradeBar.toggleVisibility(true);
+      case S.QUEST:
+        this.dom.setQuest(data);
         break;
-      }
-
+      case S.WORLD_EVENT:
+        this.dom.setEvent(data);
+        break;
+      case S.CHEST_STATE:
+        this.dom.updateChest(data);
+        break;
+      case S.MINIMAP:
+        this.dom.setMinimap(data.points);
+        break;
+      case S.CAVE_CELLS:
+        this.renderer.caves.addCells(data);
+        break;
+      case S.ARENA_STATE:
+        this.arenaState = data;
+        this.dom.refresh("arena");
+        break;
       default:
-        console.warn("unknown packet type:", packet.code);
+        console.warn("unknown packet", code);
     }
   }
 
-  /**
-   * Send a move packet to the server.
-   * @param {number} direction - The direction to move in.
-   */
-  async sendMove(direction) {
-    await this.sendEncrypted({ dir: direction }, 2);
-  }
-
-  async chooseWeapon(weapon) {
-    await this.sendEncrypted({ weapon: weapon }, 15);
-  }
-
-  /**
-   * Send an aim packet to the server.
-   * @param {number} direction - The direction to aim in.
-   */
-  async sendAim(direction) {
-    await this.sendEncrypted({ dir: direction }, 5);
-  }
-
-  /**
-   * Clean up resources.
-   */
-  cleanup() {
-    // Remove all event listeners.
-    window.removeEventListener("keydown", this.handleKey);
-    window.removeEventListener("keyup", this.handleKey);
-    window.removeEventListener("mousemove", this.handleMouseMove);
-    window.removeEventListener("mousedown", this.handleMousedown);
-    window.removeEventListener("mouseup", this.handleMousedown);
-  }
-
-  /**
-   * Clean up resources.
-   */
-  cleanup() {
-    // Remove all event listeners.
-    window.removeEventListener("keydown", this.handleKey);
-    window.removeEventListener("keyup", this.handleKey);
-    window.removeEventListener("mousemove", this.handleMouseMove);
-    window.removeEventListener("mousedown", this.handleMousedown);
-    window.removeEventListener("mouseup", this.handleMousedown);
-
-    // Release datagram writer and reader locks.
-    if (this.datagramWriter) {
-      this.datagramWriter.releaseLock();
-      this.datagramWriter = null;
+  /** Applies a player's state from the server to their sprites. */
+  applyPlayer(p, pd) {
+    p.lastUpdate = performance.now();
+    p.underground = pd.underground;
+    p.setTargetPosition(pd.x, pd.y);
+    p.aim = pd.aim;
+    const t = this.renderer.textures;
+    if (pd.weapon !== p.weapon || pd.variant !== p.variant) {
+      p.weapon = pd.weapon;
+      p.variant = pd.variant;
+      p.setWeaponTexture(this.weaponTexture(pd.weapon, pd.variant), this.handTexture(pd.weapon, pd.variant));
+      if (p.isLocal) this.updateAmmo();
     }
-    if (this.datagramReader) {
-      this.datagramReader.cancel();
-      this.datagramReader = null;
+    if (pd.hat !== p.hat) p.setHat(pd.hat, t);
+    if (pd.accessory !== p.accessory) p.setAccessory(pd.accessory, t);
+    if (pd.skin !== p.skin) p.setSkin(pd.skin);
+    if (pd.health !== p.health || pd.max_health !== p.maxHealth) {
+      if (pd.health < p.health - 0.5 && p._shown !== false) this.renderer.fx.hitCreature(p._rx, p._ry);
+      p.setHealth(pd.health, pd.max_health);
     }
-
-    // Close WebTransport connection.
-    if (this.wt) {
-      this.wt.close();
-      this.wt = null;
+    const clan = pd.clan ?? null;
+    if (clan !== p.clan) {
+      p.clan = clan;
+      p.clanTag = clan != null ? this.clanNames.get(clan) : null;
+      p.refreshName();
     }
-
-    // Release crypto lock.
-    this.crypto = null;
   }
 
-  /**
-   * Return whether we are connected.
-   * @returns {boolean} Are we connected.
-   */
-  isConnected() {
-    return this.crypto !== null && this.datagramWriter !== null;
+  /** Texture held in a player's hands for a weapon, or null for fists. */
+  weaponTexture(id, variant = 0) {
+    const w = WEAPONS[id];
+    if (!w || id === 0) return null;
+    const t = this.renderer.textures;
+    if (w.isGun) return t[w.sprite] || null;
+    return t[w.variants?.[variant]] || t[w.sprite] || null;
   }
 
-  /**
-   * Return debug information about the connection.
-   * @returns {Object | null} Debug information or null if not connected.
-   */
-  getDebugInfo() {
-    if (!this.crypto) return null;
+  /** Ammo counter, shown while holding a gun. */
+  updateAmmo() {
+    const gun = !!this.me && !!WEAPONS[this.me.weapon]?.isGun;
+    const ammo = this.resources?.ammo ?? 0;
+    this.me?.setAmmo(ammo, gun);
+    this.hud?.actionBar.setAmmo(ammo);
+  }
 
-    return {
-      sendNonce: this.crypto.get_send_nonce(),
-      recvNonce: this.crypto.get_recv_nonce(),
-      connected: this.isConnected(),
-    };
+  /** The single dagger drawn in each hand for dual weapons. */
+  handTexture(id, variant = 0) {
+    const w = WEAPONS[id];
+    if (!w?.handSprites) return null;
+    const t = this.renderer.textures;
+    return t[w.handSprites[variant]] || t[w.handSprites[0]] || null;
+  }
+
+  /** Every frame: hide players we stopped hearing about (out of view, or in
+   * the caves while we're on the surface), and hint at cave entrances. */
+  frameChecks() {
+    const now = performance.now();
+    for (const p of this.players.values()) {
+      p.setVisible(p.isLocal || now - (p.lastUpdate ?? 0) < 400);
+    }
+    const me = this.me;
+    if (!me) return;
+    let near = false;
+    for (const o of this.objects.values()) {
+      if (isEntrance(o) && Math.hypot(o.x - me.x, o.y - me.y) < o.scale + 18) {
+        near = true;
+        break;
+      }
+    }
+    if (near && !this._nearEntrance) {
+      this.hud?.toast(me.underground ? "Press X to climb up" : "Press X to go into the caves", 2);
+    }
+    this._nearEntrance = near;
+  }
+
+  iconsFor(id) {
+    const i = this.leaderIcons;
+    return { crown: i.crown === id, skull: i.skull === id, star: i.star === id };
   }
 }
 
-// Create and initialize the game.
 const game = new Game();
+window.game = game;
 await game.init();

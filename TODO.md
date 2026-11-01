@@ -1,4 +1,4 @@
-### important: later on resolve all of cargo clippy's warnings.
+### ~~important: later on resolve all of cargo clippy's warnings.~~ done
 
 # old todo list
 
@@ -8,7 +8,7 @@
 - [ ] Bosses
 - [ ] Events and Quests
 - [-] More Players Per Server (Dont worry the map will be larger)
-- [ ] Spike Damage is now based on velocity (This fixes the pit trap spike problem)
+- [x] Spike Damage is now based on velocity (This fixes the pit trap spike problem)
 - [ ] More Weapons and Armor
 - [ ] New Animals and Improved AI
 - [ ] New Buildings, Turrets & Traps
@@ -19,7 +19,7 @@
 - [ ] More Tribe features like: Trading and Assigning Roles
 - [-] Physics Blocks and Improved Collisions
 - [ ] TNT and other explosives
-- [ ] Improved Combat to prevent food spam scripts (essentially limit the amount of food to consume per tick)
+- [x] Improved Combat to prevent food spam scripts (essentially limit the amount of food to consume per tick)
 - [-] Actual Anti bot scripts
 - [ ] Killable Nebula NPC
 - [ ] Texture Mod Support
@@ -34,8 +34,8 @@
 
 - [ ] add all missing animals from moomoo.io
 - sheep, goldfish, special sidney and other dev's bosses
-- [ ] buildings regenerate health over time
-- [ ] display building hp (either add cracks to buildings, maybe opacity, or just a plain hp bar that goes semi transparent when no interaction and re appears)
+- [x] buildings regenerate health over time
+- [x] display building hp (either add cracks to buildings, maybe opacity, or just a plain hp bar that goes semi transparent when no interaction and re appears)
 
 
 - [ ] randomly offset bulltick by 1-2 ticks

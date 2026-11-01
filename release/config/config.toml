@@ -1,0 +1,50 @@
+[game]
+hkdf_key = "agartha"
+port = 6767
+# Drop connections that go silent this long (the server pings every 5 s).
+idle_timeout_secs = 20
+
+[map]
+size = 16384
+# y
+snow_start = 0
+snow_end = 4096
+grassland_start = 4096
+grassland_end = 8192
+desert_start = 8192
+desert_end = 12288
+lava_start = 12288
+lava_end = 16384
+# x
+ocean_start_x = 10240
+ocean_end_x = 14848
+
+[players]
+# need to fix these..
+update_dt = 0.45
+player_max_speed = 45.0
+player_acceleration = 120.0
+player_friction = 90.0
+view_radius = 1400.0
+view_radius_sq = 1960000.0
+
+[entities]
+# objects
+trees_per_chunk = 9
+bushes_per_chunk = 3
+stones_per_chunk = 4
+gold_per_chunk = 1   # later move to world, 7 gold in whole map
+
+[animals]
+max_wolf = 32
+
+# fish
+fish_turn_factor = 3.0
+max_fish_alive = 8192
+fish_visual_range = 300.0
+fish_visual_range_sq = 90_000.0
+fish_protect_range_sq = 600.0
+fish_separation_factor = 0.97
+fish_alignment_factor = 0.04
+fish_cohesion_factor = 0.001
+fish_wander_strength = 0.35

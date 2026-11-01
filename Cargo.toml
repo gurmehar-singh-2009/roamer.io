@@ -1,10 +1,20 @@
 [workspace]
-members = ["server", "shared", "web/parser"]
+members = ["server", "shared", "web/parser", "web/host"]
 resolver = "3"
 
-package.license-file = "LICENSE.md"
+package.license = "MIT"
+package.repository = "https://github.com/gurmehar-singh-2009/araria"
+package.categories = ["games"]
 package.description = "A multiplayer survival game."
 package.keywords = ["moomoo", "cowgame", "moomoo.io", "moomoo2", "moomoo2.io", "new moomoo", "mohmoh", "hack", "mod", "game", "multiplayer", "survival", "agartha"]
+
+# Debug builds are too slow to keep up with the 15 ticks/s game loop, so
+# optimize a little, and optimize dependencies fully.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
 
 [profile.release]
 opt-level = 2
@@ -26,3 +36,7 @@ todo = "deny"
 unimplemented = "deny"
 print_stdout = "warn"
 print_stderr = "warn"
+# Duplicate versions come from transitive dependencies and cannot be fixed here.
+multiple_crate_versions = "allow"
+# Flags x/y coordinate pairs like `vx`/`vy`, which are everywhere in game math.
+similar_names = "allow"

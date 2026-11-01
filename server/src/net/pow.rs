@@ -7,12 +7,16 @@ use dashmap::DashMap;
 use nanorand::{Rng, WyRand};
 use sha2::{Digest, Sha256};
 
+/// Proof-of-work challenges handed out to clients before they can connect.
 pub struct Pow {
+    /// Open challenges and when they were issued.
     pub challenges: DashMap<String, Instant>,
+    /// Leading zero bits the solution's hash needs.
     pub difficulty: u32,
 }
 
 impl Pow {
+    /// Creates an empty challenge store.
     pub fn new(difficulty: u32) -> Arc<Self> {
         Arc::new(Self {
             challenges: DashMap::new(),
@@ -20,6 +24,7 @@ impl Pow {
         })
     }
 
+    /// Creates and stores a new random challenge.
     pub fn generate_challenge(&self) -> String {
         let mut rng = WyRand::new();
         let challenge: String = (0..32)
@@ -38,6 +43,8 @@ impl Pow {
         challenge
     }
 
+    /// Checks a solution. A challenge can only be used once and expires after 5
+    /// minutes.
     pub fn verify(&self, challenge: &str, nonce: &str) -> bool {
         let Some(entry) = self.challenges.get(challenge) else {
             return false;
@@ -49,7 +56,7 @@ impl Pow {
             return false;
         }
 
-        let input = format!("{}{}", challenge, nonce);
+        let input = format!("{challenge}{nonce}");
         let hash = Sha256::digest(input.as_bytes());
         let valid = leading_zero_bits(&hash) >= self.difficulty;
 
@@ -62,11 +69,13 @@ impl Pow {
         valid
     }
 
+    /// Removes expired challenges.
     pub fn sweep(&self) {
         self.challenges.retain(|_, t| t.elapsed() < Duration::from_secs(300));
     }
 }
 
+/// Counts the leading zero bits of a hash.
 fn leading_zero_bits(hash: &[u8]) -> u32 {
     let mut count = 0;
     for byte in hash {

@@ -1,69 +1,64 @@
+//! What each player has been told about.
+
 use std::collections::{HashMap, HashSet};
 
 use bevy_ecs::prelude::Resource;
+use shared::to_client::ObjectTO;
 
-use crate::CONFIG;
-
-#[derive(Clone)]
-pub struct AnimalSnapshot {
-    pub id:          u32,
-    pub x:           f32,
-    pub y:           f32,
-    pub animal_type: u8,
-}
-
-#[derive(Clone)]
-pub struct ObjSnapshot {
-    pub id:       u32,
-    pub x:        f32,
-    pub y:        f32,
-    pub dir:      f32,
-    pub scale:    f32,
-    pub type_obj: u8,
-}
-
+/// Tracks which objects each player has already been sent. Kept across
+/// deaths (the client keeps its objects too) and dropped on disconnect.
 #[derive(Resource, Default)]
 pub struct PlayerKnowledge {
-    /// Tracks the IDs of animals each player has already been sent
-    pub known_animals: HashMap<u32, HashSet<u32>>,
-    /// Tracks the IDs of static objects each player has already been sent
+    /// Object entity indices each player has been sent.
     pub known_objects: HashMap<u32, HashSet<u32>>,
 }
 
 impl PlayerKnowledge {
+    /// Starts tracking a player (keeps what they already know).
     pub fn add_player(&mut self, player_id: u32) {
-        self.known_animals.insert(player_id, HashSet::new());
-        self.known_objects.insert(player_id, HashSet::new());
+        self.known_objects.entry(player_id).or_default();
     }
 
+    /// Forgets a destroyed object for every player and returns the players
+    /// that knew about it (they need to be told to remove it).
+    pub fn forget_object(&mut self, object_id: u32) -> Vec<u32> {
+        self.known_objects
+            .iter_mut()
+            .filter_map(|(player_id, known)| known.remove(&object_id).then_some(*player_id))
+            .collect()
+    }
+
+    /// Returns the players that know about an object.
+    pub fn players_knowing(&self, object_id: u32) -> impl Iterator<Item = u32> + '_ {
+        self.known_objects
+            .iter()
+            .filter(move |(_, known)| known.contains(&object_id))
+            .map(|(player_id, _)| *player_id)
+    }
+
+    /// Stops tracking a player.
     pub fn remove_player(&mut self, player_id: u32) {
-        self.known_animals.remove(&player_id);
         self.known_objects.remove(&player_id);
     }
 
-    /// Filters an iterator of objects, returning only the ones within the
-    /// player's view radius that the player DOES NOT already know about.
+    /// Returns the objects the player can see that they haven't been sent
+    /// yet, and marks them as sent.
     pub fn drain_new_objects<'a>(
         &mut self,
         player_id: u32,
-        objects: impl Iterator<Item = &'a ObjSnapshot>,
-        px: f32,
-        py: f32,
-    ) -> Vec<ObjSnapshot> {
+        objects: impl Iterator<Item = &'a ObjectTO>,
+        visible: impl Fn(&ObjectTO) -> bool,
+    ) -> Vec<ObjectTO> {
+        let Some(known) = self.known_objects.get_mut(&player_id) else {
+            return Vec::new();
+        };
         let mut new_objects = Vec::new();
-
-        if let Some(known) = self.known_objects.get_mut(&player_id) {
-            for obj in objects {
-                let dx = obj.x - px;
-                let dy = obj.y - py;
-
-                if dx * dx + dy * dy <= CONFIG.players.view_radius_sq
-                    && known.insert(obj.id) {
-                        new_objects.push(obj.clone());
-                    }
+        for obj in objects {
+            if !known.contains(&obj.id) && visible(obj) {
+                known.insert(obj.id);
+                new_objects.push(obj.clone());
             }
         }
-
         new_objects
     }
 }
