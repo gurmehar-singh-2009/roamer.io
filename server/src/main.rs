@@ -328,9 +328,10 @@ fn spawn_accept_loop(
     });
 }
 
-/// The player's IP. Behind a proxy on this machine (the release's web client,
-/// Caddy, nginx, Vite) it's the first `X-Forwarded-For` entry; from anywhere
-/// else that header could be faked, so the socket's address is used.
+/// The player's IP. Behind a proxy on this machine or a private network (the
+/// release's web client, Caddy, nginx, Vite, a hosting provider's proxy) it's
+/// the first `X-Forwarded-For` entry; from anywhere else that header could be
+/// faked, so the socket's address is used.
 fn client_address(req: &Request, peer: std::net::IpAddr) -> String {
     let forwarded = req
         .headers()
@@ -340,8 +341,17 @@ fn client_address(req: &Request, peer: std::net::IpAddr) -> String {
         .map(str::trim)
         .filter(|v| !v.is_empty());
     match forwarded {
-        Some(ip) if peer.is_loopback() || peer.to_canonical().is_loopback() => ip.to_string(),
+        Some(ip) if is_trusted_proxy(peer) => ip.to_string(),
         _ => peer.to_canonical().to_string(),
+    }
+}
+
+/// Whether a connection comes from this machine or a private network, where a
+/// reverse proxy (Caddy, nginx, a hosting provider's proxy) would be.
+const fn is_trusted_proxy(ip: std::net::IpAddr) -> bool {
+    match ip.to_canonical() {
+        std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unique_local() || v6.is_unicast_link_local(),
     }
 }
 

@@ -57,6 +57,10 @@ Open `http://SERVER-IP:8081`. The page and the game both come through `CLIENT_PO
 
 If HTTPS is handled in front of the game by something else (a proxy that maps a domain to a port), set `GAME_URL` in `roamer.env` to where browsers should connect, for example `GAME_URL=wss://game.example.com` for a domain forwarded to `GAME_PORT`. Leave it blank to use `/ws` on the page's own address.
 
+## Hack Club Nest
+
+Nest's proxy handles HTTPS for you. In the Nest dashboard, under **Domains**, add a subdomain and point it at your VM's address and `CLIENT_PORT`, for example `10.60.x.x:8081` (`ip -4 addr` shows the address). Leave `GAME_URL` blank: the game connects through `/ws` on that same domain.
+
 ## Files it creates
 
 - `roamer.env`: your settings

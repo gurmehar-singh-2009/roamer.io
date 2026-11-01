@@ -212,8 +212,9 @@ fn head_end(buf: &[u8]) -> Option<usize> {
 }
 
 /// The request head with `X-Forwarded-For` set to the player's IP, so the
-/// game server sees who's connecting. A proxy on this machine (Caddy, nginx)
-/// has already set it; from anyone else it could be faked, so it's replaced.
+/// game server sees who's connecting. A proxy on this machine or a private
+/// network (Caddy, nginx, a hosting provider's proxy) has already set it; from
+/// anyone else it could be faked, so it's replaced.
 fn forwarded_head(head: &str, peer: IpAddr) -> String {
     let peer = peer.to_canonical();
     let mut forwarded = None;
@@ -227,13 +228,22 @@ fn forwarded_head(head: &str, peer: IpAddr) -> String {
         }
     }
     let client = match forwarded {
-        Some(chain) if peer.is_loopback() => chain,
+        Some(chain) if is_trusted_proxy(peer) => chain,
         _ => peer.to_string(),
     };
     format!(
         "{}\r\nX-Forwarded-For: {client}\r\n\r\n",
         lines.join("\r\n")
     )
+}
+
+/// Whether a connection comes from this machine or a private network, where a
+/// reverse proxy (Caddy, nginx, a hosting provider's proxy) would be.
+const fn is_trusted_proxy(ip: IpAddr) -> bool {
+    match ip.to_canonical() {
+        IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        IpAddr::V6(v6) => v6.is_loopback() || v6.is_unique_local() || v6.is_unicast_link_local(),
+    }
 }
 
 /// Passes a WebSocket connection through to the game server: sends it the
@@ -308,7 +318,7 @@ mod tests {
     }
 
     #[test]
-    fn forwarded_for_is_only_trusted_from_this_machine() {
+    fn forwarded_for_is_only_trusted_from_proxies() {
         let head = "GET /ws?pow=1 HTTP/1.1\r\nHost: x\r\nX-Forwarded-For: 1.2.3.4\r\n\r\n";
         let local: IpAddr = "127.0.0.1".parse().unwrap();
         let remote: IpAddr = "::ffff:5.6.7.8".parse().unwrap();
@@ -319,6 +329,11 @@ mod tests {
         assert_eq!(
             forwarded_head(head, remote),
             "GET /ws?pow=1 HTTP/1.1\r\nHost: x\r\nX-Forwarded-For: 5.6.7.8\r\n\r\n"
+        );
+        let nest_proxy: IpAddr = "10.60.0.1".parse().unwrap();
+        assert_eq!(
+            forwarded_head(head, nest_proxy),
+            "GET /ws?pow=1 HTTP/1.1\r\nHost: x\r\nX-Forwarded-For: 1.2.3.4\r\n\r\n"
         );
     }
 
